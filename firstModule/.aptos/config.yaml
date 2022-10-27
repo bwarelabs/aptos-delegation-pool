@@ -1,0 +1,7 @@
+---
+profiles:
+  default:
+    private_key: "0x076a0b96de3f983a505346cbc8bcde669b3fcc0cf549e1f6b55f65630d7672dd"
+    public_key: "0x1ef30a919daf0c429839361064e4412a5cf7f3d6a10374d8ad60e3da96da35a2"
+    account: 744fa5408711ebc30c2194ad47a3019c393ac76f4ebf87a938ed4ffabdeb60fe
+    rest_url: "https://aptos-testnet.public.qa.blastapi.io/v1"

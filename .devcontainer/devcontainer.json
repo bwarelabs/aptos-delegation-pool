@@ -1,0 +1,26 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the README at:
+// https://github.com/microsoft/vscode-dev-containers/tree/v0.209.6/containers/docker-existing-dockerfile
+{
+    "name": "BwareLabs Aptos",
+    // Sets the run context to one level up instead of the .devcontainer folder.
+    "context": "..",
+    // Update the 'dockerFile' property if you aren't using the standard 'Dockerfile' filename.
+    "dockerFile": "Dockerfile",
+    
+    // Set *default* container specific settings.json values on container create.
+    "settings": {
+        "terminal.integrated.profiles.linux": {
+            "bash": {
+                "path": "/bin/bash"
+            }
+        }
+    },
+    // Add the IDs of extensions you want installed when the container is created.
+    "extensions": [
+		"ms-vscode.vscode-typescript-next",
+		"ms-vscode.js-debug-nightly",
+		"streetsidesoftware.code-spell-checker",
+		"move.move-analyzer"
+	],
+    "remoteUser": "admin"
+}
