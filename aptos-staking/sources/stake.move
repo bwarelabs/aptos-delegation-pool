@@ -1,13 +1,12 @@
 module bware_framework::bware_dao_staking {
     use std::signer;
-    use std::vector;
+
     use aptos_std::math64::min;
 
     use bware_framework::deposits_adapter::{
         Self,
         get_deposit, 
         get_renewed_deposit,
-        get_actual_balance,
         increase_balance,
         increase_next_epoch_balance,
         decrease_balance,
@@ -42,31 +41,32 @@ module bware_framework::bware_dao_staking {
     }
 
     struct StakingStore has key, store {
+        owner_address: address,
         resource_signer_cap: account::SignerCapability,
         epochs: Table<u64, EpochStore>,
     }
 
-    fun init_module(account: &signer, consensus_pubkey: vector<u8>,
-        proof_of_possession: vector<u8>) {
-        let resource_signer_cap = resource_account::retrieve_resource_account_cap(account, @source_addr);
+    fun init_module(owner: &signer) {
+        let resource_signer_cap = resource_account::retrieve_resource_account_cap(owner, @source_addr);
         let resource_signer = account::create_signer_with_capability(&resource_signer_cap);
         coin::register<AptosCoin>(&resource_signer);
 
-        epoch_manager::initialize(account);
+        epoch_manager::initialize(owner);
 
-        stake::initialize_validator(&resource_signer,
-        consensus_pubkey, proof_of_possession, vector::empty(), vector::empty());
+        let owner_address = signer::address_of(owner);
+        stake::initialize_stake_owner(&resource_signer, 0, owner_address, owner_address);
         
         let epochs = table::new<u64, EpochStore>();
         table::add(&mut epochs, 1, EpochStore{
             cumulative_reward:0, coins_at_epoch_start:0, coins_deposited:0, coins_withdrawn:0
         });
-        move_to(account, StakingStore {
+        move_to(owner, StakingStore {
+            owner_address,
             resource_signer_cap,
             epochs: epochs,
         });
 
-        move_to(account, Delegation {
+        move_to(owner, Delegation {
                 active: deposits_adapter::new(true),
                 inactive: deposits_adapter::new(false),
         });
@@ -80,12 +80,13 @@ module bware_framework::bware_dao_staking {
         account::create_signer_with_capability(&borrow_global_mut<StakingStore>(@bware_framework).resource_signer_cap)
     }
 
-    public fun increase_lockup(staker: &signer) acquires StakingStore {
+    public fun increase_lockup(owner: &signer) acquires StakingStore {
         let module_data = borrow_global_mut<StakingStore>(@bware_framework);
+        assert!(module_data.owner_address == signer::address_of(owner), 1);
         let resource_signer = account::create_signer_with_capability(&module_data.resource_signer_cap);
         stake::increase_lockup(&resource_signer);
         
-        epoch_manager::increase_lockup();
+        epoch_manager::after_increase_lockup();
     }
 
     public fun add_stake(staker: &signer, amount: u64) acquires StakingStore, Delegation {
@@ -105,7 +106,11 @@ module bware_framework::bware_dao_staking {
         
         restake(staker);
         let delegation = borrow_global_mut<Delegation>(staker_address);
-        increase_next_epoch_balance(&mut delegation.active, amount);
+        if (stake::is_current_epoch_validator(@bware_framework)) {
+            increase_next_epoch_balance(&mut delegation.active, amount);
+        } else {
+            increase_balance(&mut delegation.active, amount);
+        }
     }
 
     public fun reactivate_stake(staker: &signer, amount: u64) acquires StakingStore, Delegation {
@@ -159,15 +164,17 @@ module bware_framework::bware_dao_staking {
     public fun restake(staker: &signer) acquires StakingStore, Delegation {
         let delegation = borrow_global_mut<Delegation>(signer::address_of(staker));
         let (current_epoch, current_epoch_balance, next_epoch_balance) = get_deposit(&delegation.active);
-
+        if (current_epoch == current_epoch(true)) {
+            return
+        };
         let (current_unlock_epoch, inactive, pending_active_and_inactive) = get_deposit(&delegation.inactive);
 
-        let reward_epoch_when_unlocked = lockup_to_reward_epoch(current_unlock_epoch + 1);
+        let inactivating_epoch = lockup_to_reward_epoch(current_unlock_epoch + 1);
         let pending_rewards = 
         compute_delegator_reward_over_interval(current_epoch_balance, current_epoch, current_epoch + 1) +
         compute_delegator_reward_over_interval(next_epoch_balance, current_epoch + 1, current_epoch(true));
         compute_delegator_reward_over_interval(
-            pending_active_and_inactive - inactive, current_epoch, min(reward_epoch_when_unlocked, current_epoch(true)));
+            pending_active_and_inactive - inactive, current_epoch, min(inactivating_epoch, current_epoch(true)));
 
 
         increase_balance(&mut delegation.active, pending_rewards);
@@ -208,7 +215,7 @@ module bware_framework::bware_dao_staking {
         let (_, prev_active_balance, _) = get_renewed_deposit(&joint_delegation.active);
         let prev_epoch = table::borrow(&mut staking_store.epochs, current_epoch(true));
 
-        epoch_manager::go_to_next_epoch();
+        epoch_manager::advance_epoch();
 
         let current_cumulative_reward = if (prev_active_balance == 0) {
             0
@@ -232,6 +239,12 @@ module bware_framework::bware_dao_staking {
     use aptos_framework::timestamp;
 
     #[test_only]
+    use aptos_framework::staking_config;
+
+    #[test_only]
+    use bware_framework::deposits_adapter::get_actual_balance;
+
+    #[test_only]
     const CONSENSUS_KEY_1: vector<u8> = x"8a54b92288d4ba5073d3a52e80cc00ae9fbbc1cc5b433b46089b7804c38a76f00fc64746c7685ee628fc2d0b929c2294";
     #[test_only]
     const CONSENSUS_POP_1: vector<u8> = x"a9d6c1f1270f2d1454c89a83a4099f813a56dc7db55591d46aa4e6ccae7898b234029ba7052f18755e6fa5e6b73e235f14efc4e2eb402ca2b8f56bad69f965fc11b7b25eb1c95a06f83ddfd023eac4559b6582696cfea97b227f4ce5bdfdfed0";
@@ -248,7 +261,7 @@ module bware_framework::bware_dao_staking {
         // create a resource account from the origin account, mocking the module publishing process
         resource_account::create_resource_account(origin_account, vector::empty<u8>(), vector::empty<u8>());
         
-        init_module(resource_account, CONSENSUS_KEY_1, CONSENSUS_POP_1);
+        init_module(resource_account);
     }
     
 
@@ -263,9 +276,11 @@ module bware_framework::bware_dao_staking {
         stake::initialize_for_test(framework);
         account::create_account_for_test(@aptos_framework);
         reconfiguration::initialize_for_test(framework);
+        staking_config::update_recurring_lockup_duration_secs(framework, 10000);
 
         //stake::initialize_test_validator(origin_account, 1000, true, true);
         set_up_test(origin_account, bware_framework);
+        stake::rotate_consensus_key(bware_framework, @bware_framework, CONSENSUS_KEY_1, CONSENSUS_POP_1);
 
         let coins = stake::mint_coins(1000);
         account::create_account_for_test(signer::address_of(account1));
@@ -278,35 +293,69 @@ module bware_framework::bware_dao_staking {
 
         timestamp::fast_forward_seconds(100);
         reconfiguration::reconfigure_for_test_custom();
-        end_epoch();
         stake::end_epoch();
+        end_epoch();
+
         timestamp::fast_forward_seconds(100);
+        let t = stake::get_lockup_secs(@bware_framework);
+
+        let epoch = current_epoch(false);
+        //assert!(timestamp::now_seconds() >= stake::get_lockup_secs(@bware_framework), 1);
+        assert!(reconfiguration::last_reconfiguration_time() >= epoch_manager::saved_locked_until_secs(), 1);
         reconfiguration::reconfigure_for_test_custom();
-        end_epoch();
         stake::end_epoch();
-        restake(account1);
+        end_epoch();
+
+        assert!(t == stake::get_lockup_secs(@bware_framework), 1);
+        assert!(reconfiguration::last_reconfiguration_time() / 1000000 < stake::get_lockup_secs(@bware_framework), 1);
+        assert!(timestamp::now_seconds() < stake::get_lockup_secs(@bware_framework), 1);
+
+        assert!(epoch  == current_epoch(false), 1);
 
         let delegation = borrow_global<Delegation>(signer::address_of(account1));
         assert!(coin::balance<AptosCoin>(signer::address_of(account1)) == 0,1);
         assert!(get_actual_balance(&delegation.active) >= 1000,1);
+
+        let lockup_secs = stake::get_lockup_secs(@bware_framework);
+        timestamp::fast_forward_seconds(10);
+        reconfiguration::reconfigure_for_test_custom();
+        stake::end_epoch();
+        end_epoch();
+
+        assert!(stake::get_lockup_secs(@bware_framework) == lockup_secs, 1);
+
+        assert!(stake::get_validator_state(@bware_framework) == 2,1);
+        let epoch = current_epoch(false);
+        timestamp::fast_forward_seconds(100);
+        reconfiguration::reconfigure_for_test_custom();
+        stake::end_epoch();
+        end_epoch();
+        assert!(epoch == current_epoch(false), 1);
 
         unlock(account1,1000);
         let (_,_,_,pending_inactive) = stake::get_stake(@bware_framework);
         assert!(pending_inactive == 1000,1);
         assert!(coin::balance<AptosCoin>(signer::address_of(account1)) == 0,1);
 
+        
+        
         timestamp::update_global_time_for_test_secs(stake::get_lockup_secs(@bware_framework));
         reconfiguration::reconfigure_for_test_custom();
         stake::end_epoch();
         end_epoch();
+        assert!(epoch + 1 == current_epoch(false), 1);
         restake(account1);
         let (_,inactive,_,_) = stake::get_stake(@bware_framework);
         assert!(inactive >= 1000,1);
+
+        assert!(stake::get_validator_state(@bware_framework) == 4,1);
 
         withdraw(account1, 1000);
         let balance = get_pool_balance();
         assert!(balance < 1000,1);
         assert!(coin::balance<AptosCoin>(signer::address_of(account1)) == 1000,1);
+        
+
     }
     
 }
