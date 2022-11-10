@@ -4,14 +4,16 @@ module bware_framework::deposits_adapter {
     use bware_framework::epoch_manager::current_epoch;
 
     struct DeferredDeposit has store, drop {
+        epoch_type: bool,
         current_epoch: u64,
         current_epoch_balance: u64,
         next_epoch_balance: u64,
     }
 
-    public fun new(): DeferredDeposit {
+    public fun new(epoch_type: bool): DeferredDeposit {
         DeferredDeposit {
-            current_epoch: current_epoch(),
+            epoch_type,
+            current_epoch: current_epoch(epoch_type),
             current_epoch_balance: 0,
             next_epoch_balance: 0,
         }
@@ -30,9 +32,9 @@ module bware_framework::deposits_adapter {
     }
 
     fun load_deposit(deposit: &DeferredDeposit): DeferredDeposit  {
-        let deposit_renewed = new();
+        let deposit_renewed = new(deposit.epoch_type);
         store_deposit(&mut deposit_renewed, deposit);
-        let current_epoch_ = current_epoch();
+        let current_epoch_ = current_epoch(deposit.epoch_type);
         if (current_epoch_ > deposit.current_epoch) {
             deposit_renewed.current_epoch_balance = deposit.next_epoch_balance;
             deposit_renewed.current_epoch = current_epoch_;

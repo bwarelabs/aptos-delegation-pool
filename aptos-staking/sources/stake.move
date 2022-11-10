@@ -13,7 +13,7 @@ module bware_framework::bware_dao_staking {
         decrease_balance,
         decrease_next_epoch_balance,
     };
-    use bware_framework::epoch_manager::{Self, current_epoch};
+    use bware_framework::epoch_manager::{Self, current_epoch, lockup_to_reward_epoch};
 
     use aptos_framework::coin::{Self};
     use aptos_framework::aptos_coin::AptosCoin;
@@ -67,8 +67,8 @@ module bware_framework::bware_dao_staking {
         });
 
         move_to(account, Delegation {
-                active: deposits_adapter::new(),
-                inactive: deposits_adapter::new(),
+                active: deposits_adapter::new(true),
+                inactive: deposits_adapter::new(false),
         });
     }
  
@@ -80,57 +80,60 @@ module bware_framework::bware_dao_staking {
         account::create_signer_with_capability(&borrow_global_mut<StakingStore>(@bware_framework).resource_signer_cap)
     }
 
-    public fun add_stake(staker: &signer, amount: u64) acquires StakingStore, Delegation {
-        let staker_address = signer::address_of(staker);
+    public fun increase_lockup(staker: &signer) acquires StakingStore {
         let module_data = borrow_global_mut<StakingStore>(@bware_framework);
+        let resource_signer = account::create_signer_with_capability(&module_data.resource_signer_cap);
+        stake::increase_lockup(&resource_signer);
         
+        epoch_manager::increase_lockup();
+    }
+
+    public fun add_stake(staker: &signer, amount: u64) acquires StakingStore, Delegation {
+        let module_data = borrow_global_mut<StakingStore>(@bware_framework);
         let resource_signer = account::create_signer_with_capability(&module_data.resource_signer_cap);
         
         coin::transfer<AptosCoin>(staker, signer::address_of(&resource_signer), amount);
-        
         stake::add_stake(&resource_signer, amount);
         
+        let staker_address = signer::address_of(staker);
         if (!delegation_exists(staker_address)) {
             move_to(staker, Delegation {
-                active: deposits_adapter::new(),
-                inactive: deposits_adapter::new(),
+                active: deposits_adapter::new(true),
+                inactive: deposits_adapter::new(false),
             });
         };
         
-        let alone_delegation = borrow_global_mut<Delegation>(staker_address);
-        increase_next_epoch_balance(&mut alone_delegation.active, amount);
-        
-        alone_delegation = borrow_global_mut<Delegation>(@bware_framework);
-        increase_next_epoch_balance(&mut alone_delegation.active, amount);
-    }
-
-    public fun reactivate_stake(staker: &signer, amount: u64) acquires StakingStore, Delegation {
-        let dao_archive = borrow_global_mut<StakingStore>(@bware_framework);
-        let staker_address = signer::address_of(staker);
-
-        let resource_signer = account::create_signer_with_capability(&dao_archive.resource_signer_cap);
-
-        stake::reactivate_stake(&resource_signer, amount);
-
+        restake(staker);
         let delegation = borrow_global_mut<Delegation>(staker_address);
-        amount = min(amount, get_actual_balance(&delegation.inactive));
-
-        decrease_next_epoch_balance(&mut delegation.inactive, amount);
         increase_next_epoch_balance(&mut delegation.active, amount);
     }
 
+    public fun reactivate_stake(staker: &signer, amount: u64) acquires StakingStore, Delegation {
+        let module_data = borrow_global_mut<StakingStore>(@bware_framework);
+        let resource_signer = account::create_signer_with_capability(&module_data.resource_signer_cap);
+        
+        stake::reactivate_stake(&resource_signer, amount);
+
+        restake(staker);
+
+        let delegation = borrow_global_mut<Delegation>(signer::address_of(staker));
+        let (_, inactive, pending_active_and_inactive) = get_renewed_deposit(&delegation.inactive);
+        assert!(amount + inactive <= pending_active_and_inactive, 1);
+        
+        decrease_next_epoch_balance(&mut delegation.inactive, amount);
+        increase_balance(&mut delegation.active, amount);
+    }
+
     public fun unlock(staker: &signer, amount: u64) acquires StakingStore, Delegation {
-        let dao_archive = borrow_global_mut<StakingStore>(@bware_framework);
-        let staker_address = signer::address_of(staker);
-
-        let resource_signer = account::create_signer_with_capability(&dao_archive.resource_signer_cap);
-
+        let module_data = borrow_global_mut<StakingStore>(@bware_framework);
+        let resource_signer = account::create_signer_with_capability(&module_data.resource_signer_cap);
+        
         stake::unlock(&resource_signer, amount);
 
-        let delegation = borrow_global_mut<Delegation>(staker_address);
-        //amount = min(amount, get_actual_balance(&delegation.active));
+        restake(staker);
 
-        decrease_next_epoch_balance(&mut delegation.active, amount);
+        let delegation = borrow_global_mut<Delegation>(signer::address_of(staker));
+        decrease_balance(&mut delegation.active, amount);
         increase_next_epoch_balance(&mut delegation.inactive, amount);
     }
 
@@ -156,32 +159,37 @@ module bware_framework::bware_dao_staking {
     public fun restake(staker: &signer) acquires StakingStore, Delegation {
         let delegation = borrow_global_mut<Delegation>(signer::address_of(staker));
         let (current_epoch, current_epoch_balance, next_epoch_balance) = get_deposit(&delegation.active);
+
+        let (current_unlock_epoch, inactive, pending_active_and_inactive) = get_deposit(&delegation.inactive);
+
+        let reward_epoch_when_unlocked = lockup_to_reward_epoch(current_unlock_epoch + 1);
         let pending_rewards = 
         compute_delegator_reward_over_interval(current_epoch_balance, current_epoch, current_epoch + 1) +
-        compute_delegator_reward_over_interval(next_epoch_balance, current_epoch + 1, current_epoch());
+        compute_delegator_reward_over_interval(next_epoch_balance, current_epoch + 1, current_epoch(true));
+        compute_delegator_reward_over_interval(
+            pending_active_and_inactive - inactive, current_epoch, min(reward_epoch_when_unlocked, current_epoch(true)));
+
 
         increase_balance(&mut delegation.active, pending_rewards);
+        increase_balance(&mut delegation.inactive, 0);
     }
 
     public fun withdraw(staker: &signer, amount: u64) acquires StakingStore, Delegation {
-                        let dao_archive = borrow_global_mut<StakingStore>(@bware_framework);
-        let staker_address = signer::address_of(staker);
-
-        let resource_signer = account::create_signer_with_capability(&dao_archive.resource_signer_cap);
-
+        let module_data = borrow_global_mut<StakingStore>(@bware_framework);
+        let resource_signer = account::create_signer_with_capability(&module_data.resource_signer_cap);
+        
+        // if withdraw succeeds then amount is not producing rewards on global contract starting this epoch
         stake::withdraw(&resource_signer, amount);
         
-
-        let delegation = borrow_global_mut<Delegation>(staker_address);
-        amount = min(amount, get_actual_balance(&delegation.active));
-
-        let dao_archive = borrow_global_mut<StakingStore>(@bware_framework);
-        let epoch = table::borrow_mut(&mut dao_archive.epochs, current_epoch());
+        let epoch = table::borrow_mut(&mut module_data.epochs, current_epoch(true));
         epoch.coins_withdrawn = epoch.coins_withdrawn + amount;
 
+        restake(staker);
+        
+        // this ensures the 1st global epoch after unlock time happened
+        let delegation = borrow_global_mut<Delegation>(signer::address_of(staker));
         decrease_balance(&mut delegation.inactive, amount);
-
-        coin::transfer<AptosCoin>(&resource_signer, staker_address, amount);
+        coin::transfer<AptosCoin>(&resource_signer, signer::address_of(staker), amount);
     }
 
     fun get_pool_balance(): u64 {
@@ -198,7 +206,7 @@ module bware_framework::bware_dao_staking {
         let joint_delegation = borrow_global<Delegation>(@bware_framework);
 
         let (_, prev_active_balance, _) = get_renewed_deposit(&joint_delegation.active);
-        let prev_epoch = table::borrow(&mut staking_store.epochs, current_epoch());
+        let prev_epoch = table::borrow(&mut staking_store.epochs, current_epoch(true));
 
         epoch_manager::go_to_next_epoch();
 
@@ -207,7 +215,7 @@ module bware_framework::bware_dao_staking {
         } else {
             (get_previous_epoch_rewards(prev_epoch) as u128) * APTOS_DENOMINATION / (prev_active_balance as u128)
         };
-        table::add(&mut staking_store.epochs, current_epoch(), 
+        table::add(&mut staking_store.epochs, current_epoch(true), 
         EpochStore {
             cumulative_reward: prev_epoch.cumulative_reward + current_cumulative_reward,
             coins_at_epoch_start: get_pool_balance(),
@@ -256,7 +264,7 @@ module bware_framework::bware_dao_staking {
         account::create_account_for_test(@aptos_framework);
         reconfiguration::initialize_for_test(framework);
 
-        stake::initialize_test_validator(origin_account, 1000, true, true);
+        //stake::initialize_test_validator(origin_account, 1000, true, true);
         set_up_test(origin_account, bware_framework);
 
         let coins = stake::mint_coins(1000);
@@ -264,12 +272,41 @@ module bware_framework::bware_dao_staking {
         coin::register<AptosCoin>(account1);
         coin::deposit<AptosCoin>(signer::address_of(account1), coins);
         add_stake(account1, 1000);
-        unlock(account1,1000);
-        //unlock(account1,1000);
+
+        stake::set_operator(bware_framework,signer::address_of(origin_account));
+        stake::join_validator_set(origin_account,@bware_framework );
 
         timestamp::fast_forward_seconds(100);
         reconfiguration::reconfigure_for_test_custom();
         end_epoch();
+        stake::end_epoch();
+        timestamp::fast_forward_seconds(100);
+        reconfiguration::reconfigure_for_test_custom();
+        end_epoch();
+        stake::end_epoch();
+        restake(account1);
+
+        let delegation = borrow_global<Delegation>(signer::address_of(account1));
+        assert!(coin::balance<AptosCoin>(signer::address_of(account1)) == 0,1);
+        assert!(get_actual_balance(&delegation.active) >= 1000,1);
+
+        unlock(account1,1000);
+        let (_,_,_,pending_inactive) = stake::get_stake(@bware_framework);
+        assert!(pending_inactive == 1000,1);
+        assert!(coin::balance<AptosCoin>(signer::address_of(account1)) == 0,1);
+
+        timestamp::update_global_time_for_test_secs(stake::get_lockup_secs(@bware_framework));
+        reconfiguration::reconfigure_for_test_custom();
+        stake::end_epoch();
+        end_epoch();
+        restake(account1);
+        let (_,inactive,_,_) = stake::get_stake(@bware_framework);
+        assert!(inactive >= 1000,1);
+
+        withdraw(account1, 1000);
+        let balance = get_pool_balance();
+        assert!(balance < 1000,1);
+        assert!(coin::balance<AptosCoin>(signer::address_of(account1)) == 1000,1);
     }
     
 }
