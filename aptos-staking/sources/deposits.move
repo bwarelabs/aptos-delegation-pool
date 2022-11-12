@@ -1,9 +1,13 @@
-
 module bwarelabs::deposits_adapter {
+    use std::error;
 
     use bwarelabs::epoch_manager;
 
-    struct DeferredDeposit has store, drop {
+    /// Subtraction overflow on decreasing deposit's balances
+    const ENOT_ENOUGH_BALANCE: u64 = 1;
+    const ENOT_ENOUGH_NEXT_BALANCE: u64 = 2;
+
+    struct DeferredDeposit has store, copy {
         current_epoch: u64,
         current_epoch_balance: u64,
         next_epoch_balance: u64,
@@ -13,16 +17,19 @@ module bwarelabs::deposits_adapter {
 
     public fun new(pool_address: address, renewed_on_lockup_epoch: bool): DeferredDeposit {
         DeferredDeposit {
-            renewed_on_lockup_epoch,
             current_epoch: current_epoch(pool_address, renewed_on_lockup_epoch),
             current_epoch_balance: 0,
             next_epoch_balance: 0,
+            renewed_on_lockup_epoch,
             pool_address,
         }
     }
 
     fun current_epoch(pool_address: address, renewed_on_lockup_epoch: bool): u64 {
-        if (renewed_on_lockup_epoch) epoch_manager::current_lockup_epoch(pool_address) else epoch_manager::current_epoch(pool_address)
+        if (renewed_on_lockup_epoch)
+            epoch_manager::current_lockup_epoch(pool_address)
+        else
+            epoch_manager::current_epoch(pool_address)
     }
 
     public fun get_deposit(deposit: &DeferredDeposit): (u64, u64, u64) {
@@ -30,69 +37,59 @@ module bwarelabs::deposits_adapter {
     }
 
     public fun get_renewed_deposit(deposit: &DeferredDeposit): (u64, u64, u64) {
-        get_deposit(&load_deposit(deposit))
+        let deposit_ = *deposit;
+        renew_deposit(&mut deposit_);
+        let DeferredDeposit {
+            current_epoch, current_epoch_balance, next_epoch_balance,
+            renewed_on_lockup_epoch: _, pool_address: _,
+        } = deposit_;
+        (current_epoch, current_epoch_balance, next_epoch_balance)
     }
 
-    public fun get_actual_balance(deposit: &DeferredDeposit): u64 {
-        deposit.next_epoch_balance
-    }
-
-    fun load_deposit(deposit: &DeferredDeposit): DeferredDeposit  {
-        let deposit_renewed = new(deposit.pool_address, deposit.renewed_on_lockup_epoch);
-        store_deposit(&mut deposit_renewed, deposit);
-        let current_epoch_ = current_epoch(deposit.pool_address, deposit.renewed_on_lockup_epoch);
-        if (current_epoch_ > deposit.current_epoch) {
-            deposit_renewed.current_epoch_balance = deposit.next_epoch_balance;
-            deposit_renewed.current_epoch = current_epoch_;
+    fun renew_deposit(deposit: &mut DeferredDeposit) {
+        let current_epoch = current_epoch(deposit.pool_address, deposit.renewed_on_lockup_epoch);
+        if (current_epoch > deposit.current_epoch) {
+            deposit.current_epoch_balance = deposit.next_epoch_balance;
+            deposit.current_epoch = current_epoch;
         };
-        deposit_renewed
-    }
-
-    fun store_deposit(depositTo: &mut DeferredDeposit, depositFrom: &DeferredDeposit) {
-        depositTo.current_epoch = depositFrom.current_epoch;
-        depositTo.current_epoch_balance = depositFrom.current_epoch_balance;
-        depositTo.next_epoch_balance = depositFrom.next_epoch_balance;
     }
 
     public fun increase_balance(deposit: &mut DeferredDeposit, amount: u64) {
-        let deposit_renewed = load_deposit(deposit);
+        renew_deposit(deposit);
         spec {
-            assume deposit_renewed.current_epoch_balance + amount <= MAX_U64;
-            assume deposit_renewed.next_epoch_balance + amount <= MAX_U64;
+            assume deposit.current_epoch_balance + amount <= MAX_U64;
+            assume deposit.next_epoch_balance + amount <= MAX_U64;
         };
-        deposit_renewed.current_epoch_balance = deposit_renewed.current_epoch_balance + amount;
-        deposit_renewed.next_epoch_balance = deposit_renewed.next_epoch_balance + amount;
-        store_deposit(deposit, &deposit_renewed);
+        deposit.current_epoch_balance = deposit.current_epoch_balance + amount;
+        deposit.next_epoch_balance = deposit.next_epoch_balance + amount;
     }
 
     public fun decrease_balance(deposit: &mut DeferredDeposit, amount: u64) {
-        let deposit_renewed = load_deposit(deposit);
+        renew_deposit(deposit);
         spec {
-            assume deposit_renewed.current_epoch_balance >= amount;
-            assume deposit_renewed.next_epoch_balance >= amount;
+            assume deposit.current_epoch_balance >= amount;
+            assume deposit.next_epoch_balance >= amount;
         };
-        assert!(deposit_renewed.current_epoch_balance >= amount, 1);
-        deposit_renewed.current_epoch_balance = deposit_renewed.current_epoch_balance - amount;
-        deposit_renewed.next_epoch_balance = deposit_renewed.next_epoch_balance - amount;
-        store_deposit(deposit, &deposit_renewed);
+        assert!(deposit.current_epoch_balance >= amount, error::invalid_argument(ENOT_ENOUGH_BALANCE));
+        assert!(deposit.next_epoch_balance >= amount, error::invalid_argument(ENOT_ENOUGH_NEXT_BALANCE));
+        deposit.current_epoch_balance = deposit.current_epoch_balance - amount;
+        deposit.next_epoch_balance = deposit.next_epoch_balance - amount;
     }
 
     public fun increase_next_epoch_balance(deposit: &mut DeferredDeposit, amount: u64) {
-        let deposit_renewed = load_deposit(deposit);
+        renew_deposit(deposit);
         spec {
-            assume deposit_renewed.next_epoch_balance + amount <= MAX_U64;
+            assume deposit.next_epoch_balance + amount <= MAX_U64;
         };
-        deposit_renewed.next_epoch_balance = deposit_renewed.next_epoch_balance + amount;
-        store_deposit(deposit, &deposit_renewed);
+        deposit.next_epoch_balance = deposit.next_epoch_balance + amount;
     }
 
     public fun decrease_next_epoch_balance(deposit: &mut DeferredDeposit, amount: u64) {
-        let deposit_renewed = load_deposit(deposit);
+        renew_deposit(deposit);
         spec {
-            assume deposit_renewed.next_epoch_balance >= amount;
+            assume deposit.next_epoch_balance >= amount;
         };
-        assert!(deposit_renewed.next_epoch_balance >= amount, 1);
-        deposit_renewed.next_epoch_balance = deposit_renewed.next_epoch_balance - amount;
-        store_deposit(deposit, &deposit_renewed);
+        assert!(deposit.next_epoch_balance >= amount, error::invalid_argument(ENOT_ENOUGH_NEXT_BALANCE));
+        deposit.next_epoch_balance = deposit.next_epoch_balance - amount;
     }
 }
