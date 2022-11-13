@@ -44,7 +44,7 @@ module bwarelabs::epoch_manager {
         );
     }
 
-    public(friend) fun attempt_advance_epoch(pool_address: address): bool acquires EpochsJournal {
+    public(friend) fun advance_epoch(pool_address: address): bool acquires EpochsJournal {
         let journal = borrow_global_mut<EpochsJournal>(pool_address);
         let saved_aptos_epoch = current_aptos_epoch();
         if (saved_aptos_epoch <= journal.saved_aptos_epoch) {
@@ -84,7 +84,8 @@ module bwarelabs::epoch_manager {
         if (table::contains(&journal.lockup_to_reward_epoch, lockup_epoch)) {
             *table::borrow(&journal.lockup_to_reward_epoch, lockup_epoch)
         } else {
-            0
+            // requested unlock epoch for pool never passed
+            current_epoch(pool_address)
         }
     }
 

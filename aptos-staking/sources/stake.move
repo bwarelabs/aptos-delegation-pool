@@ -142,7 +142,6 @@ module bwarelabs::delegation_pool {
         let pool = borrow_global_mut<DelegationPool>(pool_address);
         pool.observable_pool_balance = pool.observable_pool_balance + amount;
 
-
         let acc_delegation = &mut pool.acc_delegation;
         let delegation = table::borrow_mut(
             &mut borrow_global_mut<DelegationsOwned>(signer::address_of(delegator)).delegations,
@@ -157,7 +156,7 @@ module bwarelabs::delegation_pool {
             increase_balance(&mut acc_delegation.active, amount);
         }
     }
-    
+
     public entry fun unlock(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
         let stake_pool_signer = get_stake_pool_signer(pool_address);
         stake::unlock(&stake_pool_signer, amount);
@@ -201,11 +200,12 @@ module bwarelabs::delegation_pool {
         // if withdraw succeeds then amount is not producing rewards on global contract starting this epoch
         stake::withdraw(&stake_pool_signer, amount);
 
-        let module_data = borrow_global_mut<DelegationPool>(pool_address);
-        module_data.observable_pool_balance = module_data.observable_pool_balance - amount;
-
         restake(delegator, pool_address);
-        let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
+
+        let pool = borrow_global_mut<DelegationPool>(pool_address);
+        pool.observable_pool_balance = pool.observable_pool_balance - amount;
+
+        let acc_delegation = &mut pool.acc_delegation;
         let delegation = table::borrow_mut(
             &mut borrow_global_mut<DelegationsOwned>(signer::address_of(delegator)).delegations,
             pool_address
@@ -237,27 +237,38 @@ module bwarelabs::delegation_pool {
 
     public entry fun restake(delegator: &signer, pool_address: address) acquires DelegationPool, DelegationsOwned {
         end_epoch(pool_address);
+        let current_epoch = current_epoch(pool_address);
+        let delegation = table::borrow_mut(
+            &mut borrow_global_mut<DelegationsOwned>(signer::address_of(delegator)).delegations,
+            pool_address
+        );
 
-        let delegations = &mut borrow_global_mut<DelegationsOwned>(signer::address_of(delegator)).delegations;
-        let delegation = table::borrow_mut(delegations, pool_address);
-
-        let (current_epoch, current_epoch_balance, next_epoch_balance) = get_deposit(&delegation.active);
-        if (current_epoch == current_epoch(pool_address)) {
+        let (last_restake_epoch, active, active_next) = get_deposit(&delegation.active);
+        if (last_restake_epoch == current_epoch) {
             return
         };
-        let (current_unlock_epoch, inactive, inactive_and_pending_inactive) = get_deposit(&delegation.inactive);
 
-        let inactivating_epoch = lockup_to_reward_epoch(pool_address, current_unlock_epoch + 1);
-        let pending_rewards =
-            compute_reward_over_interval(pool_address, current_epoch_balance, current_epoch, current_epoch + 1) +
-            compute_reward_over_interval(pool_address, next_epoch_balance, current_epoch + 1, current_epoch(pool_address)) +
-            compute_reward_over_interval(
-                pool_address,
-                inactive_and_pending_inactive - inactive, current_epoch,
-                min(inactivating_epoch, current_epoch(pool_address)));
+        let rewards_amount = compute_reward_over_interval(
+            pool_address,
+            active,
+            last_restake_epoch,
+            last_restake_epoch + 1
+        ) + compute_reward_over_interval(
+            pool_address,
+            active_next,
+            last_restake_epoch + 1,
+            current_epoch
+        );
 
+        let (last_unlock_epoch, inactive, inactive_next) = get_deposit(&delegation.inactive);
+        rewards_amount = rewards_amount + compute_reward_over_interval(
+            pool_address,
+            inactive_next - inactive,
+            last_restake_epoch,
+            lockup_to_reward_epoch(pool_address, last_unlock_epoch + 1)
+        );
 
-        increase_balance(&mut delegation.active, pending_rewards);
+        increase_balance(&mut delegation.active, rewards_amount);
         increase_balance(&mut delegation.inactive, 0);
     }
 
@@ -266,32 +277,34 @@ module bwarelabs::delegation_pool {
         active + inactive + pending_active + pending_inactive
     }
 
-    fun get_pool_epoch_rewards(pool_address: address): u128 acquires DelegationPool {
-        let pool = borrow_global<DelegationPool>(pool_address);
-        ((get_pool_balance(pool_address) - pool.observable_pool_balance) as u128)
+    fun capture_previous_epoch_rewards(pool_address: address, earning_stake: u64): u128 acquires DelegationPool {
+        let total_balance = get_pool_balance(pool_address);
+        let observable_balance = &mut borrow_global_mut<DelegationPool>(pool_address).observable_pool_balance;
+        let epoch_rewards = total_balance - *observable_balance;
+
+        if (earning_stake != 0) {
+            *observable_balance = total_balance;
+            (epoch_rewards as u128) * APTOS_DENOMINATION / (earning_stake as u128)
+        } else {
+            // leave excess balance to next epoch if zero earning stake on pool
+            0
+        }
     }
 
     public entry fun end_epoch(pool_address: address) acquires DelegationPool {
         let acc_delegation = &borrow_global<DelegationPool>(pool_address).acc_delegation;
         let (_, active, _) = get_renewed_deposit(&acc_delegation.active);
-        let (_, inactive, inactive_and_pending_inactive) = get_renewed_deposit(&acc_delegation.inactive);
-        active = active + inactive_and_pending_inactive - inactive;
+        let (_, inactive, inactive_and_pending) = get_renewed_deposit(&acc_delegation.inactive);
+        active = active + inactive_and_pending - inactive;
 
-        if (!epoch_manager::attempt_advance_epoch(pool_address)) {
+        if (!epoch_manager::advance_epoch(pool_address)) {
             return
         };
+        let current_epoch = current_epoch(pool_address);
 
-        let ratio_rewards_coins = if (active == 0) { 0 } else {
-            (get_pool_epoch_rewards(pool_address) as u128) * APTOS_DENOMINATION / (active as u128)
-        };
-
-        let pool = borrow_global_mut<DelegationPool>(pool_address);
-        let cumulative_rewards = *table::borrow(&pool.cumulative_rewards, current_epoch(pool_address) - 1);
-        table::add(
-            &mut pool.cumulative_rewards,
-            current_epoch(pool_address),
-            cumulative_rewards + ratio_rewards_coins
-        );
-        pool.observable_pool_balance = get_pool_balance(pool_address);
+        let normalized_rwd = capture_previous_epoch_rewards(pool_address, active);
+        let cumulative_rewards = &mut borrow_global_mut<DelegationPool>(pool_address).cumulative_rewards;
+        normalized_rwd = normalized_rwd + *table::borrow(cumulative_rewards, current_epoch - 1);
+        table::add(cumulative_rewards, current_epoch, normalized_rwd);
     }
 }
