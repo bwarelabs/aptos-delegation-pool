@@ -17,7 +17,7 @@ module bwarelabs::epoch_manager {
         saved_locked_until_secs: u64,
     }
 
-    struct EpochsJournal has key, store {
+    struct EpochsJournal has key {
         reward_epoch: u64,
         lockup_epoch: u64,
         saved_aptos_epoch: u64,
@@ -29,15 +29,12 @@ module bwarelabs::epoch_manager {
     /// Conversion factor between seconds and microseconds
     const MICRO_CONVERSION_FACTOR: u64 = 1000000;
 
-    /// Starting index for the rewards and unlock epochs
-    const POOL_GENESIS_EPOCH: u64 = 1;
-
     public(friend) fun initialize_epoch_manager(stake_pool_owner: &signer) {
         move_to<EpochsJournal>(
             stake_pool_owner,
             EpochsJournal {
-                reward_epoch: POOL_GENESIS_EPOCH,
-                lockup_epoch: POOL_GENESIS_EPOCH,
+                reward_epoch: 1,
+                lockup_epoch: 1,
                 saved_aptos_epoch: current_aptos_epoch(),
                 // stake pool address == address of owner of stake pool (not delegation one)
                 saved_locked_until_secs: get_lockup_secs(signer::address_of(stake_pool_owner)),

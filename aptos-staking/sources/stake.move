@@ -19,9 +19,7 @@ module bwarelabs::delegation_pool {
     use aptos_framework::aptos_coin::AptosCoin;
     use aptos_std::table::{Self, Table};
     use aptos_framework::account;
-    use aptos_framework::resource_account;
     use aptos_framework::stake::{Self};
-
 
     const APTOS_DENOMINATION: u128 = 100000000;
 
@@ -30,9 +28,10 @@ module bwarelabs::delegation_pool {
     /// Delegation pool owner capability does not exist at the provided account.
     const EOWNER_CAP_NOT_FOUND: u64 = 2;
 
+    /// Capability that represents ownership over not-shared operations of underlying stake pool.
     struct DelegationPoolOwnership has key, store {
+        /// equal to address of the resource account owning the stake pool
         pool_address: address,
-        // == created resource account address
     }
 
     struct Delegation has store {
@@ -42,43 +41,17 @@ module bwarelabs::delegation_pool {
         inactive: deposits_adapter::DeferredDeposit,
     }
 
-    struct DelegationsOwned has key, store {
+    struct DelegationsOwned has key {
+        /// set of delegations made by an account, indexed by host stake pool
         delegations: Table<address, Delegation>,
     }
 
-    struct DelegationPool has key, store {
-        /// current observable balance of the shared pool (excluding coins received externally - rewards)
+    struct DelegationPool has key {
+        /// current observable balance of delegation pool (excluding coins received externally - rewards)
         observable_pool_balance: u64,
         cumulative_rewards: Table<u64, u128>,
         acc_delegation: Delegation,
-        resource_signer_cap: account::SignerCapability,
-    }
-
-    public fun initialize_delegation_pool(owner: &signer, resource_account_seed: vector<u8>) acquires DelegationsOwned {
-        let (resource_signer, resource_signer_cap) = account::create_resource_account(owner, resource_account_seed);
-        coin::register<AptosCoin>(&resource_signer);
-
-        // resource_signer is the account owning the pool resource and its owner capability 
-        stake::initialize_stake_owner(&resource_signer, 0, signer::address_of(owner), signer::address_of(owner));
-
-        epoch_manager::initialize_epoch_manager(&resource_signer);
-
-        let pool_address = signer::address_of(&resource_signer);
-        let cumulative_rewards = table::new<u64, u128>();
-        table::add(&mut cumulative_rewards, current_epoch(pool_address), 0);
-        move_to(&resource_signer, DelegationPool {
-            observable_pool_balance: 0,
-            cumulative_rewards,
-            acc_delegation: new_delegation(pool_address),
-            resource_signer_cap,
-        });
-
-        initialize_delegation(&resource_signer, signer::address_of(&resource_signer));
-
-        // save resource account (== pool address) and shared pool ownership on `owner` account
-        move_to(owner, DelegationPoolOwnership {
-            pool_address: signer::address_of(&resource_signer)
-        });
+        stake_pool_signer_cap: account::SignerCapability,
     }
 
     fun new_delegation(pool_address: address): Delegation {
@@ -90,42 +63,87 @@ module bwarelabs::delegation_pool {
         }
     }
 
-    public fun initialize_delegation(account: &signer, pool_address: address) acquires DelegationsOwned {
-        if (!exists<DelegationsOwned>(signer::address_of(account))) {
-            move_to(account, DelegationsOwned { delegations: table::new<address, Delegation>() });
-        };
-        let delegation_set = borrow_global_mut<DelegationsOwned>(signer::address_of(account));
-        if (!table::contains(&delegation_set.delegations, pool_address)) {
-            table::add(&mut delegation_set.delegations, pool_address, new_delegation(pool_address))
-        }
+    public entry fun initialize_delegation_pool(owner: &signer, seed: vector<u8>) {
+        let (stake_pool_signer, stake_pool_signer_cap) = account::create_resource_account(owner, seed);
+        coin::register<AptosCoin>(&stake_pool_signer);
+
+        // stake_pool_signer is owner account of stake pool and has `OwnerCapability`
+        let owner_address = signer::address_of(owner);
+        let pool_address = signer::address_of(&stake_pool_signer);
+        stake::initialize_stake_owner(&stake_pool_signer, 0, owner_address, owner_address);
+
+        epoch_manager::initialize_epoch_manager(&stake_pool_signer);
+
+        let cumulative_rewards = table::new<u64, u128>();
+        table::add(&mut cumulative_rewards, 1, 0);
+
+        move_to(&stake_pool_signer, DelegationPool {
+            observable_pool_balance: 0,
+            cumulative_rewards,
+            acc_delegation: new_delegation(pool_address),
+            stake_pool_signer_cap,
+        });
+
+        // save resource-account address (inner pool address) + outer pool ownership on `owner`
+        move_to(owner, DelegationPoolOwnership { pool_address });
     }
 
-    fun get_resource_signer(pool_address: address): signer acquires DelegationPool {
-        account::create_signer_with_capability(&borrow_global_mut<DelegationPool>(pool_address).resource_signer_cap)
+    fun get_stake_pool_signer(pool_address: address): signer acquires DelegationPool {
+        account::create_signer_with_capability(&borrow_global_mut<DelegationPool>(pool_address).stake_pool_signer_cap)
     }
 
     fun assert_owner_cap_exists(owner: address) {
         assert!(exists<DelegationPoolOwnership>(owner), error::not_found(EOWNER_CAP_NOT_FOUND));
     }
 
-    public fun increase_lockup(owner: &signer) acquires DelegationPoolOwnership, DelegationPool {
+    fun initialize_delegation(delegator: &signer, pool_address: address) acquires DelegationsOwned {
+        let delegator_address = signer::address_of(delegator);
+        if (!exists<DelegationsOwned>(delegator_address)) {
+            move_to(delegator, DelegationsOwned { delegations: table::new<address, Delegation>() });
+        };
+        let delegations = &mut borrow_global_mut<DelegationsOwned>(delegator_address).delegations;
+        if (!table::contains(delegations, pool_address)) {
+            table::add(delegations, pool_address, new_delegation(pool_address))
+        }
+    }
+
+    public entry fun set_operator(owner: &signer, new_operator: address) acquires DelegationPoolOwnership, DelegationPool {
         let owner_address = signer::address_of(owner);
         assert_owner_cap_exists(owner_address);
         let ownership_cap = borrow_global_mut<DelegationPoolOwnership>(owner_address);
+        stake::set_operator(&get_stake_pool_signer(ownership_cap.pool_address), new_operator);
+    }
 
-        stake::increase_lockup(&get_resource_signer(ownership_cap.pool_address));
+    public entry fun set_delegated_voter(owner: &signer, new_voter: address) acquires DelegationPoolOwnership, DelegationPool {
+        let owner_address = signer::address_of(owner);
+        assert_owner_cap_exists(owner_address);
+        let ownership_cap = borrow_global_mut<DelegationPoolOwnership>(owner_address);
+        stake::set_delegated_voter(&get_stake_pool_signer(ownership_cap.pool_address), new_voter);
+    }
+
+    public entry fun increase_lockup(owner: &signer) acquires DelegationPoolOwnership, DelegationPool {
+        let owner_address = signer::address_of(owner);
+        assert_owner_cap_exists(owner_address);
+        let ownership_cap = borrow_global_mut<DelegationPoolOwnership>(owner_address);
+        stake::increase_lockup(&get_stake_pool_signer(ownership_cap.pool_address));
+
         epoch_manager::after_increase_lockup(ownership_cap.pool_address);
     }
 
-    public fun add_stake(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
-        let resource_signer = get_resource_signer(pool_address);
-        coin::transfer<AptosCoin>(delegator, signer::address_of(&resource_signer), amount);
-        stake::add_stake(&resource_signer, amount);
+    public entry fun add_stake(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
+        let stake_pool_signer = get_stake_pool_signer(pool_address);
+        coin::transfer<AptosCoin>(delegator, signer::address_of(&stake_pool_signer), amount);
+        stake::add_stake(&stake_pool_signer, amount);
 
         initialize_delegation(delegator, pool_address);
 
         restake(delegator, pool_address);
-        let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
+
+        let pool = borrow_global_mut<DelegationPool>(pool_address);
+        pool.observable_pool_balance = pool.observable_pool_balance + amount;
+
+
+        let acc_delegation = &mut pool.acc_delegation;
         let delegation = table::borrow_mut(
             &mut borrow_global_mut<DelegationsOwned>(signer::address_of(delegator)).delegations,
             pool_address
@@ -139,10 +157,27 @@ module bwarelabs::delegation_pool {
             increase_balance(&mut acc_delegation.active, amount);
         }
     }
+    
+    public entry fun unlock(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
+        let stake_pool_signer = get_stake_pool_signer(pool_address);
+        stake::unlock(&stake_pool_signer, amount);
 
-    public fun reactivate_stake(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
-        let resource_signer = get_resource_signer(pool_address);
-        stake::reactivate_stake(&resource_signer, amount);
+        restake(delegator, pool_address);
+        let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
+        let delegation = table::borrow_mut(
+            &mut borrow_global_mut<DelegationsOwned>(signer::address_of(delegator)).delegations,
+            pool_address
+        );
+
+        decrease_balance(&mut delegation.active, amount);
+        decrease_balance(&mut acc_delegation.active, amount);
+        increase_next_epoch_balance(&mut delegation.inactive, amount);
+        increase_next_epoch_balance(&mut acc_delegation.inactive, amount);
+    }
+
+    public entry fun reactivate_stake(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
+        let stake_pool_signer = get_stake_pool_signer(pool_address);
+        stake::reactivate_stake(&stake_pool_signer, amount);
 
         restake(delegator, pool_address);
         let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
@@ -160,9 +195,14 @@ module bwarelabs::delegation_pool {
         increase_balance(&mut acc_delegation.active, amount);
     }
 
-    public fun unlock(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
-        let resource_signer = get_resource_signer(pool_address);
-        stake::unlock(&resource_signer, amount);
+    public entry fun withdraw(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
+        let stake_pool_signer = get_stake_pool_signer(pool_address);
+
+        // if withdraw succeeds then amount is not producing rewards on global contract starting this epoch
+        stake::withdraw(&stake_pool_signer, amount);
+
+        let module_data = borrow_global_mut<DelegationPool>(pool_address);
+        module_data.observable_pool_balance = module_data.observable_pool_balance - amount;
 
         restake(delegator, pool_address);
         let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
@@ -171,10 +211,9 @@ module bwarelabs::delegation_pool {
             pool_address
         );
 
-        decrease_balance(&mut delegation.active, amount);
-        decrease_balance(&mut acc_delegation.active, amount);
-        increase_next_epoch_balance(&mut delegation.inactive, amount);
-        increase_next_epoch_balance(&mut acc_delegation.inactive, amount);
+        decrease_balance(&mut delegation.inactive, amount);
+        decrease_balance(&mut acc_delegation.inactive, amount);
+        coin::transfer<AptosCoin>(&stake_pool_signer, signer::address_of(delegator), amount);
     }
 
     fun compute_reward_over_interval(
@@ -196,7 +235,7 @@ module bwarelabs::delegation_pool {
            *table::borrow(&staking_store.cumulative_rewards, begin_epoch)) * (balance_over_interval as u128) / APTOS_DENOMINATION) as u64)
     }
 
-    public fun restake(delegator: &signer, pool_address: address) acquires DelegationPool, DelegationsOwned {
+    public entry fun restake(delegator: &signer, pool_address: address) acquires DelegationPool, DelegationsOwned {
         end_epoch(pool_address);
 
         let delegations = &mut borrow_global_mut<DelegationsOwned>(signer::address_of(delegator)).delegations;
@@ -222,27 +261,6 @@ module bwarelabs::delegation_pool {
         increase_balance(&mut delegation.inactive, 0);
     }
 
-    public fun withdraw(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
-        let resource_signer = get_resource_signer(pool_address);
-
-        // if withdraw succeeds then amount is not producing rewards on global contract starting this epoch
-        stake::withdraw(&resource_signer, amount);
-
-        let module_data = borrow_global_mut<DelegationPool>(pool_address);
-        module_data.observable_pool_balance = module_data.observable_pool_balance - amount;
-
-        restake(delegator, pool_address);
-        let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
-        let delegation = table::borrow_mut(
-            &mut borrow_global_mut<DelegationsOwned>(signer::address_of(delegator)).delegations,
-            pool_address
-        );
-
-        decrease_balance(&mut delegation.inactive, amount);
-        decrease_balance(&mut acc_delegation.inactive, amount);
-        coin::transfer<AptosCoin>(&resource_signer, signer::address_of(delegator), amount);
-    }
-
     fun get_pool_balance(pool_address: address): u64 {
         let (active, inactive, pending_active, pending_inactive) = stake::get_stake(pool_address);
         active + inactive + pending_active + pending_inactive
@@ -253,7 +271,7 @@ module bwarelabs::delegation_pool {
         ((get_pool_balance(pool_address) - pool.observable_pool_balance) as u128)
     }
 
-    public fun end_epoch(pool_address: address) acquires DelegationPool {
+    public entry fun end_epoch(pool_address: address) acquires DelegationPool {
         let acc_delegation = &borrow_global<DelegationPool>(pool_address).acc_delegation;
         let (_, active, _) = get_renewed_deposit(&acc_delegation.active);
         let (_, inactive, inactive_and_pending_inactive) = get_renewed_deposit(&acc_delegation.inactive);
