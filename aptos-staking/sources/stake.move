@@ -97,6 +97,11 @@ module bwarelabs::delegation_pool {
         assert!(exists<DelegationPoolOwnership>(owner), error::not_found(EOWNER_CAP_NOT_FOUND));
     }
 
+    public fun get_owned_pool_address(owner: address): address acquires DelegationPoolOwnership {
+        assert_owner_cap_exists(owner);
+        borrow_global<DelegationPoolOwnership>(owner).pool_address
+    }
+
     fun initialize_delegation(delegator: &signer, pool_address: address) acquires DelegationsOwned {
         let delegator_address = signer::address_of(delegator);
         if (!exists<DelegationsOwned>(delegator_address)) {
@@ -202,7 +207,6 @@ module bwarelabs::delegation_pool {
 
         let stake_pool_signer = get_stake_pool_signer(pool_address);
         let pool = borrow_global_mut<DelegationPool>(pool_address);
-        pool.observable_pool_balance = pool.observable_pool_balance - amount;
 
         let acc_delegation = &mut pool.acc_delegation;
         let delegation = table::borrow_mut(
@@ -213,6 +217,7 @@ module bwarelabs::delegation_pool {
         let (_, inactive, _) = get_renewed_deposit(&delegation.inactive);
         amount = min(amount, inactive);
         stake::withdraw(&stake_pool_signer, amount);
+        pool.observable_pool_balance = pool.observable_pool_balance - amount;
 
         decrease_balance(&mut delegation.inactive, amount);
         decrease_balance(&mut acc_delegation.inactive, amount);
@@ -271,6 +276,8 @@ module bwarelabs::delegation_pool {
 
         increase_balance(&mut delegation.active, rewards_amount);
         increase_balance(&mut delegation.inactive, 0);
+        let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
+        increase_balance(&mut acc_delegation.active, rewards_amount);
     }
 
     fun get_pool_balance(pool_address: address): u64 {
