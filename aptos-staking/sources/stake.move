@@ -154,11 +154,9 @@ module bwarelabs::delegation_pool {
         stake::add_stake(&stake_pool_signer, amount);
 
         if (stake::is_current_epoch_validator(pool_address)) {
-            increase_next_epoch_balance(&mut delegation.active, amount);
-            increase_next_epoch_balance(&mut acc_delegation.active, amount);
+            increase_next_epoch_balance(&mut delegation.active, &mut acc_delegation.active, amount);
         } else {
-            increase_balance(&mut delegation.active, amount);
-            increase_balance(&mut acc_delegation.active, amount);
+            increase_balance(&mut delegation.active, &mut acc_delegation.active, amount);
         }
     }
 
@@ -176,10 +174,8 @@ module bwarelabs::delegation_pool {
         amount = min(amount, active);
         stake::unlock(&stake_pool_signer, amount);
 
-        decrease_balance(&mut delegation.active, amount);
-        decrease_balance(&mut acc_delegation.active, amount);
-        increase_next_epoch_balance(&mut delegation.inactive, amount);
-        increase_next_epoch_balance(&mut acc_delegation.inactive, amount);
+        decrease_balance(&mut delegation.active, &mut acc_delegation.active, amount);
+        increase_next_epoch_balance(&mut delegation.inactive, &mut acc_delegation.inactive, amount);
     }
 
     public entry fun reactivate_stake(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
@@ -197,10 +193,8 @@ module bwarelabs::delegation_pool {
         amount = min(amount, inactive_and_pending_inactive - inactive);
         stake::reactivate_stake(&stake_pool_signer, amount);
 
-        decrease_next_epoch_balance(&mut delegation.inactive, amount);
-        decrease_next_epoch_balance(&mut acc_delegation.inactive, amount);
-        increase_balance(&mut delegation.active, amount);
-        increase_balance(&mut acc_delegation.active, amount);
+        decrease_next_epoch_balance(&mut delegation.inactive, &mut acc_delegation.inactive, amount);
+        increase_balance(&mut delegation.active, &mut acc_delegation.active, amount);
     }
 
     public entry fun withdraw(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
@@ -220,8 +214,7 @@ module bwarelabs::delegation_pool {
         stake::withdraw(&stake_pool_signer, amount);
         pool.observable_pool_balance = pool.observable_pool_balance - amount;
 
-        decrease_balance(&mut delegation.inactive, amount);
-        decrease_balance(&mut acc_delegation.inactive, amount);
+        decrease_balance(&mut delegation.inactive, &mut acc_delegation.inactive, amount);
         coin::transfer<AptosCoin>(&stake_pool_signer, signer::address_of(delegator), amount);
     }
 
@@ -255,7 +248,7 @@ module bwarelabs::delegation_pool {
             return
         };
 
-        let rewards_amount = compute_reward_over_interval(
+        let rewards_active = compute_reward_over_interval(
             pool_address,
             active,
             last_restake_epoch,
@@ -268,17 +261,22 @@ module bwarelabs::delegation_pool {
         );
 
         let (last_unlock_epoch, inactive, inactive_next) = get_deposit(&delegation.inactive);
-        rewards_amount = rewards_amount + compute_reward_over_interval(
+        let (unlock_epoch, unlocked) = lockup_to_reward_epoch(pool_address, last_unlock_epoch + 1);
+        let rewards_pending_inactive = compute_reward_over_interval(
             pool_address,
             inactive_next - inactive,
             last_restake_epoch,
-            lockup_to_reward_epoch(pool_address, last_unlock_epoch + 1)
+            if (unlocked) unlock_epoch else current_epoch
         );
 
-        increase_balance(&mut delegation.active, rewards_amount);
-        increase_balance(&mut delegation.inactive, 0);
+        // also sync accumulator delegation as new coins have been added
         let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
-        increase_balance(&mut acc_delegation.active, rewards_amount);
+        increase_balance(&mut delegation.active, &mut acc_delegation.active, rewards_active);
+        if (unlocked && unlock_epoch <= current_epoch) {
+            increase_balance(&mut delegation.inactive, &mut acc_delegation.inactive, rewards_pending_inactive);
+        } else {
+            increase_next_epoch_balance(&mut delegation.inactive, &mut acc_delegation.inactive, rewards_pending_inactive);
+        }
     }
 
     fun get_pool_balance(pool_address: address): u64 {
@@ -295,7 +293,7 @@ module bwarelabs::delegation_pool {
             *observable_balance = total_balance;
             (epoch_rewards as u128) * APTOS_DENOMINATION / (earning_stake as u128)
         } else {
-            // leave excess balance to next epoch if zero earning stake on pool
+            // leave excess balance to current epoch if zero earning stake on pool at previous one
             0
         }
     }
@@ -310,8 +308,9 @@ module bwarelabs::delegation_pool {
             return
         };
         let current_epoch = current_epoch(pool_address);
-
         let normalized_rwd = capture_previous_epoch_rewards(pool_address, active);
+
+        // persist the cumulative reward produced by the delegation pool until this new epoch
         let cumulative_rewards = &mut borrow_global_mut<DelegationPool>(pool_address).cumulative_rewards;
         normalized_rwd = normalized_rwd + *table::borrow(cumulative_rewards, current_epoch - 1);
         table::add(cumulative_rewards, current_epoch, normalized_rwd);

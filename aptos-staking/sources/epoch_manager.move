@@ -88,13 +88,13 @@ module bwarelabs::epoch_manager {
         true
     }
 
-    public fun lockup_to_reward_epoch(pool_address: address, lockup_epoch: u64): u64 acquires EpochsJournal {
+    public fun lockup_to_reward_epoch(pool_address: address, lockup_epoch: u64): (u64, bool) acquires EpochsJournal {
         let lockup_to_reward_epoch = &borrow_global<EpochsJournal>(pool_address).lockup_to_reward_epoch;
         if (table::contains(lockup_to_reward_epoch, lockup_epoch)) {
-            *table::borrow(lockup_to_reward_epoch, lockup_epoch)
+            (*table::borrow(lockup_to_reward_epoch, lockup_epoch), true)
         } else {
-            // requested unlock epoch for pool never passed => return current epoch then
-            current_epoch(pool_address)
+            // requested unlock epoch for pool never passed
+            (0, false)
         }
     }
 
@@ -108,8 +108,8 @@ module bwarelabs::epoch_manager {
 
     public(friend) fun after_increase_lockup(pool_address: address) acquires EpochsJournal {
         let last_locked_until_secs = &mut borrow_global_mut<EpochsJournal>(pool_address).last_locked_until_secs;
-        // saved lockup time may not apply anymore for current `lockup` epoch as it has been extended
-        // if already got to inactivate tokens, use it unchanged when advancing `lockup` epoch
+        // last lockup end-time may not apply anymore for current `lockup_epoch` as it has just been extended
+        // if it already got to inactivate stake (an aptos epoch exceeded it), use it as-is for current `lockup_epoch`
         if (last_reconfiguration_time() / MICRO_CONVERSION_FACTOR < *last_locked_until_secs) {
             *last_locked_until_secs = get_lockup_secs(pool_address);
         }
