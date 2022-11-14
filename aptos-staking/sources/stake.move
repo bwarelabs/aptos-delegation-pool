@@ -193,6 +193,7 @@ module bwarelabs::delegation_pool {
         );
 
         let (_, inactive, inactive_and_pending_inactive) = get_renewed_deposit(&delegation.inactive);
+        // invariant: `inactive` next == `inactive` current + pending_inactive
         amount = min(amount, inactive_and_pending_inactive - inactive);
         stake::reactivate_stake(&stake_pool_signer, amount);
 

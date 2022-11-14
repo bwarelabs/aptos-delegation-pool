@@ -56,14 +56,16 @@ module bwarelabs::delegation_pool_tests {
         reconfiguration::reconfigure_for_test_custom();
     }
 
-    #[test(aptos_framework = @0x1, validator = @0x123, user = @0x456)]
-    public entry fun test_end_to_end(aptos_framework: &signer, validator: &signer, user: &signer) {
+    #[test(aptos_framework = @0x1, validator = @0x123, user = @0x456, other = @0x798)]
+    public entry fun test_end_to_end(aptos_framework: &signer, validator: &signer, user: &signer, other: &signer) {
         let validator_addr = signer::address_of(validator);
         let user_addr = signer::address_of(user);
+        let other_addr = signer::address_of(other);
 
         // reward rate is 1% per epoch, or 1 / 100
         initialize_test_state(aptos_framework, validator, 1, 100);
         initialize_user(aptos_framework, user, 1000);
+        initialize_user(aptos_framework, other, 1000);
 
         staking_config::update_recurring_lockup_duration_secs(aptos_framework, 10000);
 
@@ -74,17 +76,61 @@ module bwarelabs::delegation_pool_tests {
         stake::join_validator_set(validator, pool_address);
 
         new_epoch();
-        new_epoch();
-        delegation_pool::restake(user, pool_address);
+        // here validator active
+
+        let count = 30;
+        loop {
+            new_epoch();
+            delegation_pool::end_epoch(pool_address);
+            count = count - 1;
+            if (count == 0) break
+        };
+
+        delegation_pool::add_stake(other, pool_address, 300);
+
+        let count = 30;
+        loop {
+            new_epoch();
+            delegation_pool::end_epoch(pool_address);
+            count = count - 1;
+            if (count == 0) break
+        };
+
         delegation_pool::unlock(user, pool_address, 1000);
+        delegation_pool::reactivate_stake(user, pool_address, 1000);
+        delegation_pool::unlock(other, pool_address, 1000);
         timestamp::fast_forward_seconds(10000);
         new_epoch();
         delegation_pool::end_epoch(pool_address);
         delegation_pool::withdraw(user, pool_address, 1000);
+        delegation_pool::withdraw(other, pool_address, 1000);
 
+        print<u64>(&coin::balance<AptosCoin>(user_addr));
+        print<u64>(&coin::balance<AptosCoin>(other_addr));
+
+        delegation_pool::unlock(user, pool_address, 1000);
+        timestamp::fast_forward_seconds(10000);
+        new_epoch();
+        delegation_pool::withdraw(user, pool_address, 1000);
         print<u64>(&coin::balance<AptosCoin>(user_addr));
 
         delegation_pool::set_operator(validator, signer::address_of(validator));
+
+        delegation_pool::add_stake(other, pool_address, 300);
+        stake::join_validator_set(validator, pool_address);
+        let count = 30;
+        loop {
+            new_epoch();
+            delegation_pool::end_epoch(pool_address);
+            count = count - 1;
+            if (count == 0) break
+        };
+        delegation_pool::unlock(other, pool_address, 1000);
+        timestamp::fast_forward_seconds(10000);
+        new_epoch();
+        delegation_pool::end_epoch(pool_address);
+        delegation_pool::withdraw(other, pool_address, 1000);
+        print<u64>(&coin::balance<AptosCoin>(other_addr));
 
 
         timestamp::fast_forward_seconds(100);
