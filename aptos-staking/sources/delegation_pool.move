@@ -229,7 +229,7 @@ module bwarelabs::delegation_pool {
         if (balance_over_interval == 0 || begin_epoch == end_epoch) {
             return 0
         };
-        assert!(begin_epoch < end_epoch, error::internal(EINVALID_EPOCH_INTERVAL));
+        assert!(begin_epoch < end_epoch, error::invalid_state(EINVALID_EPOCH_INTERVAL));
 
         let cumulative_rewards = &borrow_global<DelegationPool>(pool_address).cumulative_rewards;
         fp32::multiply_u64(balance_over_interval,
@@ -240,7 +240,17 @@ module bwarelabs::delegation_pool {
         )
     }
 
+    /**
+     * Restake all rewards produced by a delegator from its `active` and `pending-inactive` stake
+     * since the last restake and up to the previous delegation-pool epoch.
+     * The underlying rewards on the stake-pool are automatically restaked by aptos staking module, 
+     * but not individually collected for each user of the delegation-pool.
+     * INVARIANT:`restake` MUST be called before any stake-changing operation on a delegation in order
+     * to capture rewards produced under old balances which are about to change.
+     */
     public entry fun restake(delegator: &signer, pool_address: address) acquires DelegationPool, DelegationsOwned {
+        // prior to stake-changing ops, try moving to a new epoch in order to ensure that
+        // one aptos epoch passes and any deferred op applies after it already did at stake-pool level
         end_epoch(pool_address);
         let current_epoch = current_epoch(pool_address);
         let delegation = table::borrow_mut(
@@ -248,35 +258,44 @@ module bwarelabs::delegation_pool {
             pool_address
         );
 
-        let (last_restake_epoch, active, active_next) = get_deposit(&delegation.active);
+        let (last_restake_epoch, active, active_and_pending_active) = get_deposit(&delegation.active);
+        // inductively, last epoch when delegation changed == last restake epoch (collected rewards up to previous)
         if (last_restake_epoch == current_epoch) {
             return
         };
 
         let rewards_active = compute_reward_over_interval(
+            // earned in last_restake_epoch - only active stake is earning
             pool_address,
             active,
             last_restake_epoch,
             last_restake_epoch + 1
         ) + compute_reward_over_interval(
+            // earned in [last_restake_epoch + 1, current_epoch) - pending stake activated and remained constant
             pool_address,
-            active_next,
+            active_and_pending_active,
             last_restake_epoch + 1,
             current_epoch
         );
 
-        let (last_unlock_epoch, inactive, inactive_next) = get_deposit(&delegation.inactive);
+        let (last_unlock_epoch, inactive, inactive_and_pending_inactive) = get_deposit(&delegation.inactive);
         let (unlock_epoch, unlocked) = lockup_to_reward_epoch(pool_address, last_unlock_epoch + 1);
+        // as both active and inactive stakes of a delegation are always updated together:
+        // `unlock_epoch` <= `last_restake_epoch` <= next unlocking epoch to `last_unlock_epoch`
+
         let rewards_pending_inactive = compute_reward_over_interval(
+            // earned in [last_restake_epoch, current_epoch/unlock_epoch) - pending stake could have been inactivated
             pool_address,
-            inactive_next - inactive,
+            inactive_and_pending_inactive - inactive,
             last_restake_epoch,
+            // not `unlocked` means pending inactive stake not inactivated by current epoch
             if (unlocked) unlock_epoch else current_epoch
         );
 
         // also sync accumulator delegation as new coins have been added
         let acc_delegation = &mut borrow_global_mut<DelegationPool>(pool_address).acc_delegation;
         increase_balance(&mut delegation.active, &mut acc_delegation.active, rewards_active);
+        // pending-inactive rewards get unlocked along with the stake producing them
         if (unlocked && unlock_epoch <= current_epoch) {
             increase_balance(&mut delegation.inactive, &mut acc_delegation.inactive, rewards_pending_inactive);
         } else {
