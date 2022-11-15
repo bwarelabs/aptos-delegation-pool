@@ -9,7 +9,7 @@ module bwarelabs::delegation_pool_tests {
     use aptos_framework::account;
     use aptos_framework::reconfiguration;
     use aptos_framework::aptos_coin::{Self, AptosCoin};
-    use aptos_std::debug::print;
+    //use aptos_std::debug::print;
 
     use aptos_framework::timestamp;
     use bwarelabs::delegation_pool;
@@ -59,8 +59,8 @@ module bwarelabs::delegation_pool_tests {
     #[test(aptos_framework = @0x1, validator = @0x123, user = @0x456, other = @0x798)]
     public entry fun test_end_to_end(aptos_framework: &signer, validator: &signer, user: &signer, other: &signer) {
         let validator_addr = signer::address_of(validator);
-        let user_addr = signer::address_of(user);
-        let other_addr = signer::address_of(other);
+        //let user_addr = signer::address_of(user);
+        //let other_addr = signer::address_of(other);
 
         // reward rate is 1% per epoch, or 1 / 100
         initialize_test_state(aptos_framework, validator, 1, 100);
@@ -70,8 +70,6 @@ module bwarelabs::delegation_pool_tests {
         staking_config::update_recurring_lockup_duration_secs(aptos_framework, 10000);
 
         let pool_address: address = delegation_pool::get_owned_pool_address(validator_addr);
-        print<address>(&validator_addr);
-        print<address>(&pool_address);
         delegation_pool::add_stake(user, pool_address, 100);
         stake::join_validator_set(validator, pool_address);
 
@@ -105,14 +103,10 @@ module bwarelabs::delegation_pool_tests {
         delegation_pool::withdraw(user, pool_address, 1000);
         delegation_pool::withdraw(other, pool_address, 1000);
 
-        print<u64>(&coin::balance<AptosCoin>(user_addr));
-        print<u64>(&coin::balance<AptosCoin>(other_addr));
-
         delegation_pool::unlock(user, pool_address, 1000);
         timestamp::fast_forward_seconds(10000);
         new_epoch();
         delegation_pool::withdraw(user, pool_address, 1000);
-        print<u64>(&coin::balance<AptosCoin>(user_addr));
 
         delegation_pool::set_operator(validator, signer::address_of(validator));
 
@@ -130,8 +124,6 @@ module bwarelabs::delegation_pool_tests {
         new_epoch();
         delegation_pool::end_epoch(pool_address);
         delegation_pool::withdraw(other, pool_address, 1000);
-        print<u64>(&coin::balance<AptosCoin>(other_addr));
-
 
         timestamp::fast_forward_seconds(100);
         delegation_pool::end_epoch(pool_address);

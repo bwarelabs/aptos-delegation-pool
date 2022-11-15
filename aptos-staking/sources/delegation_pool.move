@@ -1,6 +1,7 @@
 module bwarelabs::delegation_pool {
     use std::signer;
     use std::error;
+    use std::fixed_point32 as fp32;
 
     use aptos_std::math64::min;
 
@@ -50,7 +51,7 @@ module bwarelabs::delegation_pool {
     struct DelegationPool has key {
         /// current observable balance of delegation pool (excluding coins received externally - rewards)
         observable_pool_balance: u64,
-        cumulative_rewards: Table<u64, u128>,
+        cumulative_rewards: Table<u64, fp32::FixedPoint32>,
         acc_delegation: Delegation,
         stake_pool_signer_cap: account::SignerCapability,
     }
@@ -75,8 +76,8 @@ module bwarelabs::delegation_pool {
 
         epoch_manager::initialize_epoch_manager(&stake_pool_signer);
 
-        let cumulative_rewards = table::new<u64, u128>();
-        table::add(&mut cumulative_rewards, 1, 0);
+        let cumulative_rewards = table::new<u64, fp32::FixedPoint32>();
+        table::add(&mut cumulative_rewards, 1, fp32::create_from_raw_value(0));
 
         move_to(&stake_pool_signer, DelegationPool {
             observable_pool_balance: 0,
@@ -231,8 +232,12 @@ module bwarelabs::delegation_pool {
         assert!(begin_epoch < end_epoch, error::internal(EINVALID_EPOCH_INTERVAL));
 
         let cumulative_rewards = &borrow_global<DelegationPool>(pool_address).cumulative_rewards;
-        (((*table::borrow(cumulative_rewards, end_epoch) - *table::borrow(cumulative_rewards, begin_epoch)) *
-          (balance_over_interval as u128) / APTOS_DENOMINATION) as u64)
+        fp32::multiply_u64(balance_over_interval,
+            fp32::create_from_raw_value(
+                fp32::get_raw_value(*table::borrow(cumulative_rewards, end_epoch)) -
+                fp32::get_raw_value(*table::borrow(cumulative_rewards, begin_epoch))
+            )
+        )
     }
 
     public entry fun restake(delegator: &signer, pool_address: address) acquires DelegationPool, DelegationsOwned {
@@ -284,17 +289,17 @@ module bwarelabs::delegation_pool {
         active + inactive + pending_active + pending_inactive
     }
 
-    fun capture_previous_epoch_rewards(pool_address: address, earning_stake: u64): u128 acquires DelegationPool {
+    fun capture_previous_epoch_rewards(pool_address: address, earning_stake: u64): fp32::FixedPoint32 acquires DelegationPool {
         let total_balance = get_pool_balance(pool_address);
         let observable_balance = &mut borrow_global_mut<DelegationPool>(pool_address).observable_pool_balance;
         let epoch_rewards = total_balance - *observable_balance;
 
         if (earning_stake != 0) {
             *observable_balance = total_balance;
-            (epoch_rewards as u128) * APTOS_DENOMINATION / (earning_stake as u128)
+            fp32::create_from_rational(epoch_rewards, earning_stake)
         } else {
             // leave excess balance to current epoch if zero earning stake on pool at previous one
-            0
+            fp32::create_from_raw_value(0)
         }
     }
 
@@ -312,7 +317,10 @@ module bwarelabs::delegation_pool {
 
         // persist the cumulative reward produced by the delegation pool until this new epoch
         let cumulative_rewards = &mut borrow_global_mut<DelegationPool>(pool_address).cumulative_rewards;
-        normalized_rwd = normalized_rwd + *table::borrow(cumulative_rewards, current_epoch - 1);
+        normalized_rwd = fp32::create_from_raw_value(
+            fp32::get_raw_value(normalized_rwd) +
+            fp32::get_raw_value(*table::borrow(cumulative_rewards, current_epoch - 1))
+        );
         table::add(cumulative_rewards, current_epoch, normalized_rwd);
     }
 }
