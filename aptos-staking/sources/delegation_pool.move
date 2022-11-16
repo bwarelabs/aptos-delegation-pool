@@ -4,7 +4,9 @@ module bwarelabs::delegation_pool {
     use std::fixed_point32 as fp32;
 
     use aptos_std::math64::min;
+    use aptos_std::table::{Self, Table};
 
+    use bwarelabs::epoch_manager::{Self, current_epoch, lockup_to_reward_epoch};
     use bwarelabs::deposits_adapter::{
     Self,
     get_deposit,
@@ -14,15 +16,11 @@ module bwarelabs::delegation_pool {
     decrease_balance,
     decrease_next_epoch_balance,
     };
-    use bwarelabs::epoch_manager::{Self, current_epoch, lockup_to_reward_epoch};
 
-    use aptos_framework::coin::{Self};
-    use aptos_framework::aptos_coin::AptosCoin;
-    use aptos_std::table::{Self, Table};
     use aptos_framework::account;
-    use aptos_framework::stake::{Self};
-
-    const APTOS_DENOMINATION: u128 = 100000000;
+    use aptos_framework::aptos_coin::AptosCoin;
+    use aptos_framework::coin;
+    use aptos_framework::stake;
 
     /// Provided epochs do not form a valid interval.
     const EINVALID_EPOCH_INTERVAL: u64 = 1;
@@ -91,7 +89,7 @@ module bwarelabs::delegation_pool {
     }
 
     fun get_stake_pool_signer(pool_address: address): signer acquires DelegationPool {
-        account::create_signer_with_capability(&borrow_global_mut<DelegationPool>(pool_address).stake_pool_signer_cap)
+        account::create_signer_with_capability(&borrow_global<DelegationPool>(pool_address).stake_pool_signer_cap)
     }
 
     fun assert_owner_cap_exists(owner: address) {
@@ -131,9 +129,10 @@ module bwarelabs::delegation_pool {
     public entry fun increase_lockup(owner: &signer) acquires DelegationPoolOwnership, DelegationPool {
         let owner_address = signer::address_of(owner);
         assert_owner_cap_exists(owner_address);
-        let ownership_cap = borrow_global_mut<DelegationPoolOwnership>(owner_address);
+        let ownership_cap = borrow_global<DelegationPoolOwnership>(owner_address);
         stake::increase_lockup(&get_stake_pool_signer(ownership_cap.pool_address));
 
+        // extend tracked `locked_until_secs` time for stake-pool if not already applied
         epoch_manager::after_increase_lockup(ownership_cap.pool_address);
     }
 
@@ -249,8 +248,9 @@ module bwarelabs::delegation_pool {
      * to capture rewards produced under old balances which are about to change.
      */
     public entry fun restake(delegator: &signer, pool_address: address) acquires DelegationPool, DelegationsOwned {
-        // prior to stake-changing ops, try moving to a new epoch in order to ensure that
-        // one aptos epoch passes and any deferred op applies after it already did at stake-pool level
+        // prior to all stake-changing ops, try moving to a new epoch in order to ensure that
+        // at least one aptos epoch will have passed by the time these deferred ops will be applied ~ 
+        // stake state should change on stake-pool before on delegation-pool
         end_epoch(pool_address);
         let current_epoch = current_epoch(pool_address);
         let delegation = table::borrow_mut(

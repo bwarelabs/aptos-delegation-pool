@@ -1,6 +1,7 @@
 module bwarelabs::epoch_manager {
-    use aptos_std::table;
-    use aptos_std::signer;
+    use std::signer;
+
+    use aptos_std::table::{Self, Table};
 
     use aptos_framework::account;
     use aptos_framework::event;
@@ -22,7 +23,7 @@ module bwarelabs::epoch_manager {
     struct EpochsJournal has key {
         reward_epoch: u64,
         lockup_epoch: u64,
-        lockup_to_reward_epoch: table::Table<u64, u64>,
+        lockup_to_reward_epoch: Table<u64, u64>,
         last_aptos_epoch: u64,
         last_locked_until_secs: u64,
         new_reward_epoch_events: event::EventHandle<NewRewardEpochEvent>,
