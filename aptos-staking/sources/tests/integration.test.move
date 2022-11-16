@@ -79,6 +79,9 @@ module bwarelabs::delegation_pool_integration_tests {
         reconfiguration::initialize_for_test(aptos_framework);
         stake::initialize_for_test_custom(aptos_framework, minimum_stake, maximum_stake, recurring_lockup_secs, allow_validator_set_change,
             rewards_rate_numerator, rewards_rate_denominator, voting_power_increase_limit);
+        // start from aptos epoch 1
+        timestamp::fast_forward_seconds(EPOCH_DURATION);
+        reconfiguration::reconfigure_for_test_custom();
     }
 
     #[test_only]

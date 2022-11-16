@@ -115,14 +115,14 @@ module bwarelabs::delegation_pool {
     public entry fun set_operator(owner: &signer, new_operator: address) acquires DelegationPoolOwnership, DelegationPool {
         let owner_address = signer::address_of(owner);
         assert_owner_cap_exists(owner_address);
-        let ownership_cap = borrow_global_mut<DelegationPoolOwnership>(owner_address);
+        let ownership_cap = borrow_global<DelegationPoolOwnership>(owner_address);
         stake::set_operator(&get_stake_pool_signer(ownership_cap.pool_address), new_operator);
     }
 
     public entry fun set_delegated_voter(owner: &signer, new_voter: address) acquires DelegationPoolOwnership, DelegationPool {
         let owner_address = signer::address_of(owner);
         assert_owner_cap_exists(owner_address);
-        let ownership_cap = borrow_global_mut<DelegationPoolOwnership>(owner_address);
+        let ownership_cap = borrow_global<DelegationPoolOwnership>(owner_address);
         stake::set_delegated_voter(&get_stake_pool_signer(ownership_cap.pool_address), new_voter);
     }
 

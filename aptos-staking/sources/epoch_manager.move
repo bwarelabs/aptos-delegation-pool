@@ -1,5 +1,6 @@
 module bwarelabs::epoch_manager {
     use std::signer;
+    use std::error;
 
     use aptos_std::table::{Self, Table};
 
@@ -30,29 +31,34 @@ module bwarelabs::epoch_manager {
         new_lockup_epoch_events: event::EventHandle<NewLockupEpochEvent>,
     }
 
+    /// Cannot advance to the initial epoch of the pool - current aptos epoch is zero
+    const ECANNOT_INIT_POOL_EPOCH: u64 = 1;
+
     /// Conversion factor between seconds and microseconds
     const MICRO_CONVERSION_FACTOR: u64 = 1000000;
 
-    public(friend) fun initialize_epoch_manager(stake_pool_signer: &signer) {
+    public(friend) fun initialize_epoch_manager(stake_pool_signer: &signer) acquires EpochsJournal {
         move_to<EpochsJournal>(
             stake_pool_signer,
             EpochsJournal {
-                reward_epoch: 1,
-                lockup_epoch: 1,
+                reward_epoch: 0,
+                lockup_epoch: 0,
                 lockup_to_reward_epoch: table::new<u64, u64>(),
-                last_aptos_epoch: last_aptos_epoch(),
-                // address of stake pool == owner of stake pool (not delegation pool) == `stake_pool_signer` address
-                last_locked_until_secs: get_lockup_secs(signer::address_of(stake_pool_signer)),
+                last_aptos_epoch: 0,
+                last_locked_until_secs: 0,
                 new_reward_epoch_events: account::new_event_handle<NewRewardEpochEvent>(stake_pool_signer),
                 new_lockup_epoch_events: account::new_event_handle<NewLockupEpochEvent>(stake_pool_signer),
             }
         );
+        // address of stake-pool == owner of stake-pool (not delegation-pool) == address of `stake_pool_signer`
+        assert!(advance_epoch(signer::address_of(stake_pool_signer)), error::invalid_state(ECANNOT_INIT_POOL_EPOCH));
     }
 
     public(friend) fun advance_epoch(pool_address: address): bool acquires EpochsJournal {
         let journal = borrow_global_mut<EpochsJournal>(pool_address);
         let last_aptos_epoch = last_aptos_epoch();
         if (last_aptos_epoch <= journal.last_aptos_epoch) {
+            // exit silently if no aptos epoch has passed
             return false
         };
 
