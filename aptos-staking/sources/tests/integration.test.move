@@ -1,6 +1,5 @@
 #[test_only]
 module bwarelabs::delegation_pool_integration_tests {
-
     use bwarelabs::delegation_pool as dp;
 
     #[test_only]
@@ -32,14 +31,20 @@ module bwarelabs::delegation_pool_integration_tests {
     const LOCKUP_CYCLE_SECONDS: u64 = 3600;
 
     #[test_only]
+    const VALIDATOR_STATUS_PENDING_ACTIVE: u64 = 1;
+    const VALIDATOR_STATUS_ACTIVE: u64 = 2;
+    const VALIDATOR_STATUS_PENDING_INACTIVE: u64 = 3;
+    const VALIDATOR_STATUS_INACTIVE: u64 = 4;
+
+    #[test_only]
     public fun initialize_for_test(aptos_framework: &signer) {
         initialize_for_test_custom(aptos_framework, 100, 10000, LOCKUP_CYCLE_SECONDS, true, 1, 100, 1000000);
     }
 
     #[test_only]
     public fun end_epoch(pool_addresses: &vector<address>) {
-        reconfiguration::reconfigure_for_test_custom();
         stake::end_epoch();
+        reconfiguration::reconfigure_for_test_custom();
         let i = 0;
         let len = vector::length(pool_addresses);
         while (i < len) {
@@ -57,9 +62,7 @@ module bwarelabs::delegation_pool_integration_tests {
         stake::rotate_consensus_key(operator, pool_address, CONSENSUS_KEY_1, CONSENSUS_POP_1);
         stake::join_validator_set(operator, pool_address);
         if (should_end_epoch) {
-            reconfiguration::reconfigure_for_test_custom();
-            stake::end_epoch();
-            dp::end_epoch(pool_address);
+            end_epoch(&vector::singleton(pool_address));
         }
     }
 
@@ -76,18 +79,25 @@ module bwarelabs::delegation_pool_integration_tests {
         voting_power_increase_limit: u64,
     ) {
         account::create_account_for_test(signer::address_of(aptos_framework));
+        stake::initialize_for_test_custom(
+            aptos_framework,
+            minimum_stake,
+            maximum_stake,
+            recurring_lockup_secs,
+            allow_validator_set_change,
+            rewards_rate_numerator,
+            rewards_rate_denominator,
+            voting_power_increase_limit
+        );
         reconfiguration::initialize_for_test(aptos_framework);
-        stake::initialize_for_test_custom(aptos_framework, minimum_stake, maximum_stake, recurring_lockup_secs, allow_validator_set_change,
-            rewards_rate_numerator, rewards_rate_denominator, voting_power_increase_limit);
         // start from aptos epoch 1
-        timestamp::fast_forward_seconds(EPOCH_DURATION);
-        reconfiguration::reconfigure_for_test_custom();
+        end_epoch(&vector::empty<address>());
     }
 
     #[test_only]
-    public fun mint_and_add_stake(validator: &signer, amount: u64) {
-        stake::mint(validator, amount);
-        dp::add_stake(validator, dp::get_owned_pool_address(signer::address_of(validator)), amount);
+    public fun mint_and_add_stake(account: &signer, amount: u64) {
+        stake::mint(account, amount);
+        dp::add_stake(account, dp::get_owned_pool_address(signer::address_of(account)), amount);
     }
 
     #[test_only]
@@ -104,11 +114,11 @@ module bwarelabs::delegation_pool_integration_tests {
 
         dp::initialize_delegation_pool(validator, vector::empty<u8>());
         let validator_address = dp::get_owned_pool_address(signer::address_of(validator));
+        // validator is initially stake pool's operator
         stake::rotate_consensus_key(validator, validator_address, CONSENSUS_KEY_1, CONSENSUS_POP_1);
 
         if (amount > 0) {
-            stake::mint(validator, amount);
-            dp::add_stake(validator, validator_address, amount);
+            mint_and_add_stake(validator, amount);
         };
 
         if (should_join_validator_set) {
@@ -129,10 +139,7 @@ module bwarelabs::delegation_pool_integration_tests {
         initialize_test_validator(validator, 100, false, false);
 
         // Add more stake to exceed max. This should fail.
-        stake::mint(validator, 9901);
-        let pool_address = dp::get_owned_pool_address(signer::address_of(validator));
-
-        dp::add_stake(validator, pool_address, 9901);
+        mint_and_add_stake(validator, 9901);
     }
 
     #[test(aptos_framework = @0x1, validator_1 = @0x123, validator_2 = @0x234)]
@@ -177,7 +184,7 @@ module bwarelabs::delegation_pool_integration_tests {
         // Validator joins validator set and waits for epoch end so it's in the validator set.
         initialize_test_validator(validator, 100, true, true);
 
-        // Request to dp::unlock 50 coins, which go to pending_inactive. Validator has 50 remaining in active.
+        // Request to unlock 50 coins, which go to pending_inactive. Validator has 50 remaining in active.
         let pool_address = dp::get_owned_pool_address(signer::address_of(validator));
         dp::unlock(validator, pool_address, 50);
         stake::assert_validator_state(pool_address, 50, 0, 0, 50, 0);
@@ -214,7 +221,7 @@ module bwarelabs::delegation_pool_integration_tests {
 
         // Validator has a lockup now that they've joined the validator set.
         let validator_address = signer::address_of(validator);
-        let pool_address = dp::get_owned_pool_address(signer::address_of(validator));
+        let pool_address = dp::get_owned_pool_address(validator_address);
         let pools = vector::singleton(pool_address);
 
         assert!(stake::get_remaining_lockup_secs(pool_address) == LOCKUP_CYCLE_SECONDS, 1);
@@ -229,10 +236,10 @@ module bwarelabs::delegation_pool_integration_tests {
         // Pending_active stake is activated in the new epoch.
         // Rewards of 1 coin are also distributed for the existing active stake of 100 coins.
         end_epoch(&pools);
-        assert!(stake::get_validator_state(pool_address) == 2, 3);
+        assert!(stake::get_validator_state(pool_address) == VALIDATOR_STATUS_ACTIVE, 3);
         stake::assert_validator_state(pool_address, 302, 0, 0, 0, 0);
 
-        // Request dp::unlock of 100 coins. These 100 coins are moved to pending_inactive and will be unlocked when the
+        // Request unlock of 100 coins. These 100 coins are moved to pending_inactive and will be unlocked when the
         // current lockup expires.
         dp::unlock(validator, pool_address, 100);
         stake::assert_validator_state(pool_address, 202, 0, 0, 100, 0);
@@ -247,22 +254,35 @@ module bwarelabs::delegation_pool_integration_tests {
         stake::assert_validator_state(pool_address, 204, 101, 0, 0, 0);
 
         // Lockup is renewed and validator is still active.
-        assert!(stake::get_validator_state(pool_address) == 2, 4);
+        assert!(stake::get_validator_state(pool_address) == VALIDATOR_STATUS_ACTIVE, 4);
         assert!(stake::get_remaining_lockup_secs(pool_address) == LOCKUP_CYCLE_SECONDS, 5);
 
         // Validator withdraws from inactive stake multiple times.
         dp::withdraw(validator, pool_address, 50);
         assert!(coin::balance<AptosCoin>(validator_address) == 750, 6);
         stake::assert_validator_state(pool_address, 204, 51, 0, 0, 0);
+        // 1 unit (10 ^ -8 APT) lost at computing delegation pool cumulative rewards
         dp::withdraw(validator, pool_address, 51);
 
         assert!(coin::balance<AptosCoin>(validator_address) == 800, 7);
         stake::assert_validator_state(pool_address, 204, 1, 0, 0, 0);
 
+        // unlock some of the original stake + rewards produced
+        dp::unlock(validator, pool_address, 104);
+        stake::assert_validator_state(pool_address, 100, 1, 0, 104, 0);
+
         // Enough time has passed again and the validator's lockup is renewed once more. Validator is still active.
         timestamp::fast_forward_seconds(LOCKUP_CYCLE_SECONDS);
         end_epoch(&pools);
-        assert!(stake::get_validator_state(pool_address) == 2, 8);
+
+        // check that pending inactive stake has been inactivated + rewards
+        stake::assert_validator_state(pool_address, 101, 106, 0, 0, 0);
+        dp::withdraw(validator, pool_address, 106);
+
+        assert!(coin::balance<AptosCoin>(validator_address) == 905, 7);
+        stake::assert_validator_state(pool_address, 101, 1, 0, 0, 0);
+
+        assert!(stake::get_validator_state(pool_address) == VALIDATOR_STATUS_ACTIVE, 8);
         assert!(stake::get_remaining_lockup_secs(pool_address) == LOCKUP_CYCLE_SECONDS, 9);
     }
 

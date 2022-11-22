@@ -10,9 +10,7 @@ aptos_token = "0x3"
 core_resources = "0xA550C18"
 vm_reserved = "0x0"
 
-# change it to `source_addr = "_" when calling `create-resource-account-and-publish-package` from the cli
-bwarelabs = "0x1111"
-source_addr = "0xcafe"
+bwarelabs = "0x99"
 
 [dependencies.AptosFramework]
 git = 'https://github.com/aptos-labs/aptos-core.git'
