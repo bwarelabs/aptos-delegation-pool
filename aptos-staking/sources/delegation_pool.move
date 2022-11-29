@@ -108,6 +108,7 @@ module bwarelabs::delegation_pool {
         assert!(owner_cap_exists(owner), error::not_found(EOWNER_CAP_NOT_FOUND));
     }
 
+    /// there are stake pools proxied by no delegation pool
     fun assert_delegation_pool_exists(pool_address: address) {
         assert!(exists<DelegationPool>(pool_address), error::invalid_argument(EDELEGATION_POOL_DOES_NOT_EXIST));
     }
@@ -118,7 +119,9 @@ module bwarelabs::delegation_pool {
     }
 
     fun initialize_delegation(delegator: &signer, pool_address: address) acquires DelegationsOwned {
+        // implicitly ensure `EpochsJournal` exists to query current epoch
         assert_delegation_pool_exists(pool_address);
+
         let delegator_address = signer::address_of(delegator);
         if (!exists<DelegationsOwned>(delegator_address)) {
             move_to(delegator, DelegationsOwned { delegations: table::new<address, Delegation>() });
@@ -130,27 +133,25 @@ module bwarelabs::delegation_pool {
     }
 
     public entry fun set_operator(owner: &signer, new_operator: address) acquires DelegationPoolOwnership, DelegationPool {
-        let owner_address = signer::address_of(owner);
-        assert_owner_cap_exists(owner_address);
-        let ownership_cap = borrow_global<DelegationPoolOwnership>(owner_address);
-        stake::set_operator(&get_stake_pool_signer(ownership_cap.pool_address), new_operator);
+        stake::set_operator(
+            &get_stake_pool_signer(get_owned_pool_address(signer::address_of(owner))),
+            new_operator
+        );
     }
 
     public entry fun set_delegated_voter(owner: &signer, new_voter: address) acquires DelegationPoolOwnership, DelegationPool {
-        let owner_address = signer::address_of(owner);
-        assert_owner_cap_exists(owner_address);
-        let ownership_cap = borrow_global<DelegationPoolOwnership>(owner_address);
-        stake::set_delegated_voter(&get_stake_pool_signer(ownership_cap.pool_address), new_voter);
+        stake::set_delegated_voter(
+            &get_stake_pool_signer(get_owned_pool_address(signer::address_of(owner))),
+            new_voter
+        );
     }
 
     public entry fun increase_lockup(owner: &signer) acquires DelegationPoolOwnership, DelegationPool {
-        let owner_address = signer::address_of(owner);
-        assert_owner_cap_exists(owner_address);
-        let ownership_cap = borrow_global<DelegationPoolOwnership>(owner_address);
-        stake::increase_lockup(&get_stake_pool_signer(ownership_cap.pool_address));
+        let pool_address = get_owned_pool_address(signer::address_of(owner));
+        stake::increase_lockup(&get_stake_pool_signer(pool_address));
 
         // extend tracked `locked_until_secs` time for stake-pool if not already applied
-        epoch_manager::after_increase_lockup(ownership_cap.pool_address);
+        epoch_manager::after_increase_lockup(pool_address);
     }
 
     public entry fun add_stake(delegator: &signer, pool_address: address, amount: u64) acquires DelegationPool, DelegationsOwned {
@@ -362,10 +363,13 @@ module bwarelabs::delegation_pool {
         table::add(cumulative_rewards, current_epoch, normalized_rwd);
     }
 
+    // #[test_only]
+    // use aptos_std::debug::print;
     #[test_only]
-    //use aptos_std::debug::print;
     use aptos_std::vector;
+    #[test_only]
     use aptos_framework::reconfiguration;
+    #[test_only]
     use aptos_framework::timestamp;
 
     #[test_only]
@@ -380,8 +384,11 @@ module bwarelabs::delegation_pool {
 
     #[test_only]
     const VALIDATOR_STATUS_PENDING_ACTIVE: u64 = 1;
+    #[test_only]
     const VALIDATOR_STATUS_ACTIVE: u64 = 2;
+    #[test_only]
     const VALIDATOR_STATUS_PENDING_INACTIVE: u64 = 3;
+    #[test_only]
     const VALIDATOR_STATUS_INACTIVE: u64 = 4;
 
     #[test_only]
@@ -543,6 +550,7 @@ module bwarelabs::delegation_pool {
             table::contains(&delegation_pool.cumulative_rewards, 1) &&
             fp32::get_raw_value(*table::borrow(&delegation_pool.cumulative_rewards, 1)) == 0, 12);
         assert_delegation_pool(pool_address, 0, 0, 0, 0, false);
+        assert!(get_pool_balance(pool_address) == 0, 13);
     }
 
     #[test(aptos_framework = @aptos_framework, validator = @0x123)]
