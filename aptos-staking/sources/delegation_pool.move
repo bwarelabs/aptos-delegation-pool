@@ -22,11 +22,17 @@ module bwarelabs::delegation_pool {
     use aptos_framework::coin;
     use aptos_framework::stake;
 
-    /// Provided epochs do not form a valid interval.
-    const EINVALID_EPOCH_INTERVAL: u64 = 1;
+    /// Delegation pool does not exist at the provided pool address.
+    const EDELEGATION_POOL_DOES_NOT_EXIST: u64 = 1;
 
     /// Delegation pool owner capability does not exist at the provided account.
     const EOWNER_CAP_NOT_FOUND: u64 = 2;
+
+    /// Account is already owning a delegation pool.
+    const EOWNER_CAP_ALREADY_EXISTS: u64 = 3;
+
+    /// Provided epochs do not form a valid interval.
+    const EINVALID_EPOCH_INTERVAL: u64 = 4;
 
     /// Capability that represents ownership over not-shared operations of underlying stake pool.
     struct DelegationPoolOwnership has key, store {
@@ -64,11 +70,13 @@ module bwarelabs::delegation_pool {
     }
 
     public entry fun initialize_delegation_pool(owner: &signer, seed: vector<u8>) {
+        let owner_address = signer::address_of(owner);
+        assert!(!owner_cap_exists(owner_address), error::already_exists(EOWNER_CAP_ALREADY_EXISTS));
+
         let (stake_pool_signer, stake_pool_signer_cap) = account::create_resource_account(owner, seed);
         coin::register<AptosCoin>(&stake_pool_signer);
 
         // stake_pool_signer is owner account of stake pool and has `OwnerCapability`
-        let owner_address = signer::address_of(owner);
         let pool_address = signer::address_of(&stake_pool_signer);
         stake::initialize_stake_owner(&stake_pool_signer, 0, owner_address, owner_address);
 
@@ -92,8 +100,16 @@ module bwarelabs::delegation_pool {
         account::create_signer_with_capability(&borrow_global<DelegationPool>(pool_address).stake_pool_signer_cap)
     }
 
+    public fun owner_cap_exists(addr: address): bool {
+        exists<DelegationPoolOwnership>(addr)
+    }
+
     fun assert_owner_cap_exists(owner: address) {
-        assert!(exists<DelegationPoolOwnership>(owner), error::not_found(EOWNER_CAP_NOT_FOUND));
+        assert!(owner_cap_exists(owner), error::not_found(EOWNER_CAP_NOT_FOUND));
+    }
+
+    fun assert_delegation_pool_exists(pool_address: address) {
+        assert!(exists<DelegationPool>(pool_address), error::invalid_argument(EDELEGATION_POOL_DOES_NOT_EXIST));
     }
 
     public fun get_owned_pool_address(owner: address): address acquires DelegationPoolOwnership {
@@ -102,6 +118,7 @@ module bwarelabs::delegation_pool {
     }
 
     fun initialize_delegation(delegator: &signer, pool_address: address) acquires DelegationsOwned {
+        assert_delegation_pool_exists(pool_address);
         let delegator_address = signer::address_of(delegator);
         if (!exists<DelegationsOwned>(delegator_address)) {
             move_to(delegator, DelegationsOwned { delegations: table::new<address, Delegation>() });
@@ -323,6 +340,8 @@ module bwarelabs::delegation_pool {
     }
 
     public entry fun end_epoch(pool_address: address) acquires DelegationPool {
+        assert_delegation_pool_exists(pool_address);
+
         let acc_delegation = &borrow_global<DelegationPool>(pool_address).acc_delegation;
         let (_, active, _) = get_renewed_deposit(&acc_delegation.active);
         let (_, inactive, inactive_and_pending_inactive) = get_renewed_deposit(&acc_delegation.inactive);
@@ -439,6 +458,59 @@ module bwarelabs::delegation_pool {
     }
 
     #[test(aptos_framework = @aptos_framework, validator = @0x123)]
+    public entry fun test_set_operator_and_delegated_voter(
+        aptos_framework: &signer,
+        validator: &signer,
+    ) acquires DelegationPool, DelegationPoolOwnership {
+        initialize_for_test(aptos_framework);
+
+        let validator_address = signer::address_of(validator);
+        initialize_delegation_pool(validator, vector::empty<u8>());
+        let pool_address = get_owned_pool_address(validator_address);
+
+        assert!(stake::get_operator(pool_address) == validator_address, 1);
+        set_operator(validator, @0x111);
+        assert!(stake::get_operator(pool_address) == @0x111, 2);
+
+        assert!(stake::get_delegated_voter(pool_address) == validator_address, 1);
+        set_delegated_voter(validator, @0x112);
+        assert!(stake::get_delegated_voter(pool_address) == @0x112, 2);
+    }
+
+    #[test(aptos_framework = @aptos_framework, validator = @0x123)]
+    #[expected_failure(abort_code = 0x60002)]
+    public entry fun test_cannot_set_operator(
+        aptos_framework: &signer,
+        validator: &signer,
+    ) acquires DelegationPool, DelegationPoolOwnership {
+        initialize_for_test(aptos_framework);
+        // account does not own any delegation pool
+        set_operator(validator, @0x111);
+    }
+
+    #[test(aptos_framework = @aptos_framework, validator = @0x123)]
+    #[expected_failure(abort_code = 0x60002)]
+    public entry fun test_cannot_set_delegated_voter(
+        aptos_framework: &signer,
+        validator: &signer,
+    ) acquires DelegationPool, DelegationPoolOwnership {
+        initialize_for_test(aptos_framework);
+        // account does not own any delegation pool
+        set_delegated_voter(validator, @0x112);
+    }
+
+    #[test(aptos_framework = @aptos_framework, validator = @0x123)]
+    #[expected_failure(abort_code = 0x80003)]
+    public entry fun test_already_owns_delegation_pool(
+        aptos_framework: &signer,
+        validator: &signer,
+    ) {
+        initialize_for_test(aptos_framework);
+        initialize_delegation_pool(validator, x"00");
+        initialize_delegation_pool(validator, x"01");
+    }
+
+    #[test(aptos_framework = @aptos_framework, validator = @0x123)]
     public entry fun test_initialize_delegation_pool(
         aptos_framework: &signer,
         validator: &signer,
@@ -466,7 +538,10 @@ module bwarelabs::delegation_pool {
 
         assert!(current_epoch(pool_address) == 1, 10);
         assert!(epoch_manager::current_lockup_epoch(pool_address) == 1, 11);
-        assert!(fp32::get_raw_value(*table::borrow(&delegation_pool.cumulative_rewards, 1)) == 0, 12);
+        // check cumulative reward has been set for pool's genesis epoch
+        assert!(
+            table::contains(&delegation_pool.cumulative_rewards, 1) &&
+            fp32::get_raw_value(*table::borrow(&delegation_pool.cumulative_rewards, 1)) == 0, 12);
         assert_delegation_pool(pool_address, 0, 0, 0, 0, false);
     }
 
