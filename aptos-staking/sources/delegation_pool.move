@@ -554,6 +554,37 @@ module bwarelabs::delegation_pool {
     }
 
     #[test(aptos_framework = @aptos_framework, validator = @0x123)]
+    public entry fun test_end_epoch(
+        aptos_framework: &signer,
+        validator: &signer,
+    ) acquires DelegationPool, DelegationsOwned, DelegationPoolOwnership {
+        initialize_for_test(aptos_framework);
+        let staked_amount = 1234;
+        initialize_test_validator(validator, staked_amount, true, true);
+
+        let validator_address = signer::address_of(validator);
+        let pool_address = get_owned_pool_address(validator_address);
+
+        let current_epoch = current_epoch(pool_address);
+        end_epoch(pool_address);
+        assert!(current_epoch(pool_address) == current_epoch, 1);
+        assert!(table::contains(&borrow_global<DelegationPool>(pool_address).cumulative_rewards, current_epoch), 2);
+
+        end_epoch_synced(pool_address);
+        let cumulative_rewards = &borrow_global<DelegationPool>(pool_address).cumulative_rewards;
+        assert!(current_epoch(pool_address) == current_epoch + 1, 3);
+        assert!(table::contains(cumulative_rewards, current_epoch + 1), 4);
+
+        let previous_epoch_rewards = fp32::multiply_u64(staked_amount,
+            fp32::create_from_raw_value(
+                fp32::get_raw_value(*table::borrow(cumulative_rewards, current_epoch + 1)) -
+                fp32::get_raw_value(*table::borrow(cumulative_rewards, current_epoch))
+            )
+        );
+        assert!(previous_epoch_rewards == staked_amount * 1 / 100 - 1, 5);
+    }
+
+    #[test(aptos_framework = @aptos_framework, validator = @0x123)]
     public entry fun test_add_stake_single(
         aptos_framework: &signer,
         validator: &signer,
@@ -565,11 +596,13 @@ module bwarelabs::delegation_pool {
         let pool_address = get_owned_pool_address(validator_address);
         // stake pool is pending active => all stake is activated by default
         assert_delegation(validator_address, pool_address, 100, 0, 0, 0, true);
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 100, 1);
 
         stake::mint(validator, 300);
         add_stake(validator, pool_address, 100);
         assert_delegation(validator_address, pool_address, 200, 0, 0, 0, true);
         assert_delegation_pool(pool_address, 200, 0, 0, 0, true);
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 200, 2);
 
         stake::join_validator_set(validator, pool_address);
         end_epoch_synced(pool_address);
@@ -578,15 +611,19 @@ module bwarelabs::delegation_pool {
         add_stake(validator, pool_address, 100);
         assert_delegation(validator_address, pool_address, 200, 0, 100, 0, true);
         assert_delegation_pool(pool_address, 200, 0, 100, 0, true);
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 300, 3);
 
         // add more stake in the same epoch
         add_stake(validator, pool_address, 50);
         assert_delegation(validator_address, pool_address, 200, 0, 150, 0, true);
         assert_delegation_pool(pool_address, 200, 0, 150, 0, true);
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 350, 4);
 
         end_epoch_synced(pool_address);
         assert_delegation(validator_address, pool_address, 350, 0, 0, 0, true);
         assert_delegation_pool(pool_address, 350, 0, 0, 0, true);
+        // started epoch with observed balance containing previous rewards also
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 352, 5);
     }
 
     #[test(aptos_framework = @aptos_framework, validator = @0x123, delegator = @0x010)]
@@ -671,21 +708,28 @@ module bwarelabs::delegation_pool {
         end_epoch_synced(pool_address); // forwards another EPOCH_DURATION and unlocks stake
 
         assert_delegation(validator_address, pool_address, 250, 50, 0, 0, true);
+        // rewards produced on previous epoch should have been included into observed balance
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 305, 1);
 
         let delegator_address = signer::address_of(delegator);
         account::create_account_for_test(delegator_address);
         stake::mint(delegator, 10);
         add_stake(delegator, pool_address, 10);
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 315, 2);
 
         // try to withdraw stake unlocked by others
         withdraw(delegator, pool_address, 50);
         assert!(coin::balance<AptosCoin>(delegator_address) == 0, 1);
+        // no stake left the pool, observed balance should be unchanged
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 315, 3);
 
         // withdraw own unlocked stake
         withdraw(validator, pool_address, 50);
         assert!(coin::balance<AptosCoin>(validator_address) == 50, 2);
         // withdraw triggered a restake: 250 active * 10% + 50 pending inactive * 10% - 1 fp32 imprecision
         assert_delegation(validator_address, pool_address, 252, 0, 0, 0, true);
+        // check that observed balance has been decreased accordingly
+        assert!(borrow_global<DelegationPool>(pool_address).observable_pool_balance == 265, 4);
     }
 
     #[test(aptos_framework = @aptos_framework, validator = @0x123)]
